@@ -15,10 +15,49 @@ import torchvision.transforms as transforms
 from torch.utils.data import Dataset
 from scipy.io import loadmat
 import os
+import json
 import urllib
+import glob
+from tqdm import tqdm
 from lmdb_datasets import LMDBDataset
 from thirdparty.lsun import LSUN
 
+
+class XMagicalDataset(Dataset):
+    def __init__(self, data_dir, transform=None):
+        """
+        Args:
+            data_dir: for example, /home/junyao/Datasets/xirl/xmagical/train
+        """
+        self.transform = transform
+        # get all demo directories
+        robot_dirs = [f.path for f in os.scandir(data_dir) if f.is_dir()]
+        demo_dirs = [f.path for robot_dir in robot_dirs for f in os.scandir(robot_dir) if f.is_dir()]
+
+        self.image_paths = []
+        self.states = []
+        # loop over them, in each loop gather list of image paths and list of robot states
+        for demo_dir in tqdm(demo_dirs, desc=f'Processing data from {data_dir}...'):
+            states_json = os.path.join(demo_dir, 'states.json')
+            with open(states_json, 'r') as f:
+                states = json.load(f)
+            t = len(states[0]) // 4 - 1
+            robot_states = [[s[0], s[1], s[2*t+2], s[2*t+3]] for s in states]
+            image_paths = sorted(glob.glob(os.path.join(demo_dir, '*.png')))
+            self.states.extend(robot_states)
+            self.image_paths.extend(image_paths)
+        self.states = np.array(self.states)
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        image_path = self.image_paths[idx]
+        image = Image.open(image_path)
+        if self.transform is not None:
+            image = self.transform(image)
+        state = self.states[idx]
+        return image, state
 
 class StackedMNIST(dset.MNIST):
     def __init__(self, root, train=True, transform=None, target_transform=None,
@@ -206,6 +245,12 @@ def get_loaders_eval(dataset, args):
         train_transform, valid_transform = _data_transforms_generic(resize)
         train_data = LMDBDataset(root=args.data, name='ffhq', train=True, transform=train_transform)
         valid_data = LMDBDataset(root=args.data, name='ffhq', train=False, transform=valid_transform)
+    elif dataset == 'xmagical':
+        num_classes = 0
+        resize = 64
+        train_transform, valid_transform = _data_transforms_generic(resize)
+        train_data = XMagicalDataset(data_dir=os.path.join(args.data, 'train'), transform=train_transform)
+        valid_data = XMagicalDataset(data_dir=os.path.join(args.data, 'valid'), transform=valid_transform)
     else:
         raise NotImplementedError
 
@@ -321,3 +366,31 @@ def _data_transforms_lsun(size):
     ])
 
     return train_transform, valid_transform
+
+
+if __name__ == '__main__':
+    data_dir = '/home/junyao/Datasets/xirl/xmagical'
+    num_classes = 0
+    resize = 64
+    train_transform, valid_transform = _data_transforms_generic(resize)
+    train_data = XMagicalDataset(data_dir=os.path.join(data_dir, 'train'), transform=train_transform)
+    print(f'train length: {len(train_data)}')
+    valid_data = XMagicalDataset(data_dir=os.path.join(data_dir, 'valid'), transform=valid_transform)
+    print(f'valid length: {len(valid_data)}')
+
+    train_sampler, valid_sampler = None, None
+    batch_size = 8
+
+    train_queue = torch.utils.data.DataLoader(
+        train_data, batch_size=batch_size,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler, pin_memory=True, num_workers=0, drop_last=True)
+
+    valid_queue = torch.utils.data.DataLoader(
+        valid_data, batch_size=batch_size,
+        shuffle=(valid_sampler is None),
+        sampler=valid_sampler, pin_memory=True, num_workers=0, drop_last=False)
+
+    for idx, data in enumerate(train_queue):
+        image, state = data
+        break
