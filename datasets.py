@@ -38,19 +38,22 @@ class XMagicalDataset(Dataset):
         self.robot_states = []
         self.world_states = []
         self.robot_types = []
+        t = 3  # number of debris (targets)
         # loop over them, in each loop gather list of image paths and list of robot states
         for demo_dir in tqdm(demo_dirs, desc=f'Processing data from {data_dir}...'):
             states_json = os.path.join(demo_dir, 'states.json')
             with open(states_json, 'r') as f:
-                states = json.load(f)
-            t = len(states[0]) // 4 - 1
-            robot_states = [[s[0], s[1], s[2*t+2], s[2*t+3]] for s in states]
-            world_states = [s[2:(2+2*t)] for s in states]
+                states = json.load(f)  # states are 3-frame stack
+            states = states[1:]  # first, ignore the first frame to make len(states) and len(images) match
+            states = [s[len(s) // 3 * 2:] for s in states]  # take only the last frame of the 3-frame stack
+            robot_states = [[s[0], s[1], s[2 * t + 2], s[2 * t + 3]] for s in states]  # x, y, cos(t), sin(t) of robot
+            world_states = [s[2:(2 * t + 2)] for s in states]  # x, y of each debris (3 in total)
             image_paths = sorted(
                 # glob.glob(os.path.join(demo_dir, '*.png')),
                 [f for f in os.listdir(demo_dir) if f.endswith('.png')],
                 key=lambda fname: int(fname.split('.')[0])
             )
+            n_samples = len(image_paths)
             image_paths = [os.path.join(demo_dir, path) for path in image_paths]
             if 'gripper' in demo_dir:
                 robot_type = [1., 0., 0., 0.]
@@ -60,13 +63,15 @@ class XMagicalDataset(Dataset):
                 robot_type = [0., 0., 1., 0.]
             else:
                 robot_type = [0., 0., 0., 1.]
+            robot_types = [robot_type for _ in range(n_samples)]
 
             self.robot_states.extend(robot_states)
             self.world_states.extend(world_states)
             self.image_paths.extend(image_paths)
-            self.robot_types.extend(robot_type)
+            self.robot_types.extend(robot_types)
         self.robot_states = np.array(self.robot_states)
         self.world_states = np.array(self.world_states)
+        self.robot_types = np.array(self.robot_types)
 
     def __len__(self):
         return len(self.image_paths)
