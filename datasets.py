@@ -270,7 +270,7 @@ def get_loaders_eval(dataset, args):
     elif dataset == 'xmagical':
         num_classes = 0
         resize = 64
-        train_transform, valid_transform = _data_transforms_generic(resize)
+        train_transform, valid_transform = _data_transforms_xmagical(resize)
         train_data = XMagicalDataset(data_dir=os.path.join(args.data, 'train'), transform=train_transform)
         valid_data = XMagicalDataset(data_dir=os.path.join(args.data, 'valid'), transform=valid_transform)
     else:
@@ -384,6 +384,20 @@ def _data_transforms_lsun(size):
     valid_transform = transforms.Compose([
         transforms.Resize(size),
         transforms.CenterCrop(size),
+        transforms.ToTensor(),
+    ])
+
+    return train_transform, valid_transform
+
+
+def _data_transforms_xmagical(size):
+    train_transform = transforms.Compose([
+        transforms.Resize(size),
+        transforms.ToTensor(),
+    ])
+
+    valid_transform = transforms.Compose([
+        transforms.Resize(size),
         transforms.ToTensor(),
     ])
 
