@@ -35,7 +35,9 @@ class XMagicalDataset(Dataset):
         demo_dirs = [f.path for robot_dir in robot_dirs for f in os.scandir(robot_dir) if f.is_dir()]
 
         self.image_paths = []
-        self.states = []
+        self.robot_states = []
+        self.world_states = []
+        self.robot_types = []
         # loop over them, in each loop gather list of image paths and list of robot states
         for demo_dir in tqdm(demo_dirs, desc=f'Processing data from {data_dir}...'):
             states_json = os.path.join(demo_dir, 'states.json')
@@ -43,10 +45,28 @@ class XMagicalDataset(Dataset):
                 states = json.load(f)
             t = len(states[0]) // 4 - 1
             robot_states = [[s[0], s[1], s[2*t+2], s[2*t+3]] for s in states]
-            image_paths = sorted(glob.glob(os.path.join(demo_dir, '*.png')))
-            self.states.extend(robot_states)
+            world_states = [s[2:(2+2*t)] for s in states]
+            image_paths = sorted(
+                # glob.glob(os.path.join(demo_dir, '*.png')),
+                [f for f in os.listdir(demo_dir) if f.endswith('.png')],
+                key=lambda fname: int(fname.split('.')[0])
+            )
+            image_paths = [os.path.join(demo_dir, path) for path in image_paths]
+            if 'gripper' in demo_dir:
+                robot_type = [1., 0., 0., 0.]
+            elif 'longstick' in demo_dir:
+                robot_type = [0., 1., 0., 0.]
+            elif 'mediumstick' in demo_dir:
+                robot_type = [0., 0., 1., 0.]
+            else:
+                robot_type = [0., 0., 0., 1.]
+
+            self.robot_states.extend(robot_states)
+            self.world_states.extend(world_states)
             self.image_paths.extend(image_paths)
-        self.states = np.array(self.states)
+            self.robot_types.extend(robot_type)
+        self.robot_states = np.array(self.robot_states)
+        self.world_states = np.array(self.world_states)
 
     def __len__(self):
         return len(self.image_paths)
@@ -56,8 +76,10 @@ class XMagicalDataset(Dataset):
         image = Image.open(image_path)
         if self.transform is not None:
             image = self.transform(image)
-        state = self.states[idx]
-        return image, state
+        robot_state = self.robot_states[idx]
+        world_state = self.world_states[idx]
+        robot_type = self.robot_types[idx]
+        return image, robot_state, world_state, robot_type
 
 class StackedMNIST(dset.MNIST):
     def __init__(self, root, train=True, transform=None, target_transform=None,
@@ -392,5 +414,5 @@ if __name__ == '__main__':
         sampler=valid_sampler, pin_memory=True, num_workers=0, drop_last=False)
 
     for idx, data in enumerate(train_queue):
-        image, state = data
+        image, robot_state, world_state, robot_type = data
         break
