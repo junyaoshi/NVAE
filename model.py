@@ -119,6 +119,8 @@ class AutoEncoder(nn.Module):
                                                  minimum_groups=args.min_groups_per_scale)
 
         self.vanilla_vae = self.num_latent_scales == 1 and self.num_groups_per_scale == 1
+        self.cond_robot_state = args.cond_robot_state
+        self.cond_robot_type = args.cond_robot_type
 
         # encoder parameteres
         self.num_channels_enc = args.num_channels_enc
@@ -164,7 +166,14 @@ class AutoEncoder(nn.Module):
 
         if self.vanilla_vae:
             self.dec_tower = []
-            self.stem_decoder = Conv2D(self.num_latent_per_group, mult * self.num_channels_enc, (1, 1), bias=True)
+            info_dim = 0
+            if self.cond_robot_state:
+                info_dim += 4
+            if self.cond_robot_type:
+                info_dim += 4
+            self.stem_decoder = Conv2D(
+                self.num_latent_per_group + info_dim, mult * self.num_channels_enc, (1, 1), bias=True
+            )
         else:
             self.dec_tower, mult = self.init_decoder_tower(mult)
 
@@ -336,7 +345,12 @@ class AutoEncoder(nn.Module):
         return nn.Sequential(nn.ELU(),
                              Conv2D(C_in, C_out, 3, padding=1, bias=True))
 
-    def forward(self, x):
+    def forward(self, x, info=None):
+        """
+        Args:
+            x: the input image
+            info: additional info we want the info bottleneck to squeeze out (e.g. domain, agent position)
+        """
         s = self.stem(2 * x - 1.0)
 
         # perform pre-processing
@@ -422,6 +436,10 @@ class AutoEncoder(nn.Module):
                 s = cell(s)
 
         if self.vanilla_vae:
+            # concatenate extra info with sampled latent
+            if info is not None:
+                info = torch.tile(info, (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
+                z = torch.cat((z, info), dim=1)
             s = self.stem_decoder(z)
 
         for cell in self.post_process:
@@ -446,7 +464,7 @@ class AutoEncoder(nn.Module):
 
         return logits, log_q, log_p, kl_all, kl_diag
 
-    def sample(self, num_samples, t):
+    def sample(self, num_samples, t, info=None):
         scale_ind = 0
         z0_size = [num_samples] + self.z0_size
         dist = Normal(mu=torch.zeros(z0_size).cuda(), log_sigma=torch.zeros(z0_size).cuda(), temp=t)
@@ -474,6 +492,10 @@ class AutoEncoder(nn.Module):
                     scale_ind += 1
 
         if self.vanilla_vae:
+            # concatenate extra info with sampled latent
+            if info is not None:
+                info = torch.tile(info, (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
+                z = torch.cat((z, info), dim=1)
             s = self.stem_decoder(z)
 
         for cell in self.post_process:
