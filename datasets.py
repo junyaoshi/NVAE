@@ -81,9 +81,9 @@ class XMagicalDataset(Dataset):
         image = Image.open(image_path)
         if self.transform is not None:
             image = self.transform(image)
-        robot_state = self.robot_states[idx]
-        world_state = self.world_states[idx]
-        robot_type = self.robot_types[idx]
+        robot_state = self.robot_states[idx].astype(np.float32)
+        world_state = self.world_states[idx].astype(np.float32)
+        robot_type = self.robot_types[idx].astype(np.float32)
         return image, robot_state, world_state, robot_type
 
 class StackedMNIST(dset.MNIST):
@@ -289,12 +289,12 @@ def get_loaders_eval(dataset, args):
     train_queue = torch.utils.data.DataLoader(
         train_data, batch_size=args.batch_size,
         shuffle=(train_sampler is None),
-        sampler=train_sampler, pin_memory=True, num_workers=8, drop_last=True)
+        sampler=train_sampler, pin_memory=True, num_workers=0 if args.debug else 8, drop_last=True)
 
     valid_queue = torch.utils.data.DataLoader(
         valid_data, batch_size=args.batch_size,
         shuffle=(valid_sampler is None),
-        sampler=valid_sampler, pin_memory=True, num_workers=1, drop_last=False)
+        sampler=valid_sampler, pin_memory=True, num_workers=0 if args.debug else 1, drop_last=False)
 
     return train_queue, valid_queue, num_classes
 
