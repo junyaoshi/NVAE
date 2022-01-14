@@ -29,6 +29,10 @@ from fid.inception import InceptionV3
 
 
 def main(args):
+    # flag logic check
+    if args.process_cond_info:
+        assert args.cond_robot_type or args.cond_robot_state
+
     # ensures that weight initializations are all the same
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -49,11 +53,11 @@ def main(args):
     model = AutoEncoder(args, writer, arch_instance)
     model = model.cuda()
 
-    # check that conditional VAE is not hierarchical
-    if args.cond_robot_state or args.cond_robot_type:
-        assert model.vanilla_vae, 'Hierarchical conditional VAE not implemented.'
-        assert not args.fast_adamax, 'Using fast_adamax with Vanilla VAE would lead to a bug'
-    print(f'SANITY CHECK ||| stem decoder: {model.stem_decoder}')
+    # # check that conditional VAE is not hierarchical
+    # if args.cond_robot_state or args.cond_robot_type:
+    #     assert model.vanilla_vae, 'Hierarchical conditional VAE not implemented.'
+    #     assert not args.fast_adamax, 'Using fast_adamax with Vanilla VAE would lead to a bug'
+    # print(f'SANITY CHECK ||| stem decoder: {model.stem_decoder}')
 
     logging.info('args = %s', args)
     logging.info('param size = %fM ', utils.count_parameters_in_M(model))
@@ -409,6 +413,9 @@ if __name__ == '__main__':
                         help='This flag enables conditioning the decoder on robot state')
     parser.add_argument('--cond_robot_type', action='store_true', default=False,
                         help='This flag enables conditioning the decoder on robot type')
+    parser.add_argument('--process_cond_info', action='store_true', default=False,
+                        help='This flag creates a small MLP to process conditional input '
+                             'before it is passed into the decoder')
 
     # optimization
     parser.add_argument('--batch_size', type=int, default=200,

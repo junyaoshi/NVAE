@@ -121,6 +121,11 @@ class AutoEncoder(nn.Module):
         self.vanilla_vae = self.num_latent_scales == 1 and self.num_groups_per_scale == 1
         self.cond_robot_state = args.cond_robot_state
         self.cond_robot_type = args.cond_robot_type
+        self.cond_info_dim = 0
+        if self.cond_robot_type:
+            self.cond_info_dim += 4
+        if self.cond_robot_state:
+            self.cond_info_dim += 4
 
         # encoder parameteres
         self.num_channels_enc = args.num_channels_enc
@@ -166,13 +171,8 @@ class AutoEncoder(nn.Module):
 
         if self.vanilla_vae:
             self.dec_tower = []
-            info_dim = 0
-            if self.cond_robot_state:
-                info_dim += 4
-            if self.cond_robot_type:
-                info_dim += 4
             self.stem_decoder = Conv2D(
-                self.num_latent_per_group + info_dim, mult * self.num_channels_enc, (1, 1), bias=True
+                self.num_latent_per_group + self.cond_info_dim, mult * self.num_channels_enc, (1, 1), bias=True
             )
         else:
             self.dec_tower, mult = self.init_decoder_tower(mult)
@@ -180,6 +180,17 @@ class AutoEncoder(nn.Module):
         self.post_process, mult = self.init_post_process(mult)
 
         self.image_conditional = self.init_image_conditional(mult)
+
+        if args.process_cond_info:
+            self.cond_process = nn.Sequential(
+                nn.Linear(self.cond_info_dim, 32),
+                nn.ReLU(),
+                nn.Linear(32, 32),
+                nn.ReLU(),
+                nn.Linear(32, self.cond_info_dim)
+            )
+        else:
+            self.cond_process = None
 
         # collect all norm params in Conv2D and gamma param in batchnorm
         self.all_log_norm = []
@@ -300,7 +311,9 @@ class AutoEncoder(nn.Module):
                         cell = Cell(num_c, num_c, cell_type='normal_dec', arch=arch, use_se=self.use_se)
                         dec_tower.append(cell)
 
-                cell = DecCombinerCell(num_c, self.num_latent_per_group, num_c, cell_type='combiner_dec')
+                cell = DecCombinerCell(
+                    num_c + self.cond_info_dim, self.num_latent_per_group, num_c, cell_type='combiner_dec'
+                )
                 dec_tower.append(cell)
 
             # down cells after finishing a scale
@@ -345,11 +358,13 @@ class AutoEncoder(nn.Module):
         return nn.Sequential(nn.ELU(),
                              Conv2D(C_in, C_out, 3, padding=1, bias=True))
 
-    def forward(self, x, info=None):
+    def forward(self, x, cond_info=None):
         """
         Args:
             x: the input image
-            info: additional info we want the info bottleneck to squeeze out (e.g. domain, agent position)
+            cond_info: additional info represented as conditional input;
+                what we want the info bottleneck to squeeze out
+                (e.g. domain, agent position, 3D hand pose)
         """
         s = self.stem(2 * x - 1.0)
 
@@ -430,6 +445,11 @@ class AutoEncoder(nn.Module):
                     all_log_p.append(log_p_conv)
 
                 # 'combiner_dec'
+                if cond_info is not None:
+                    cond_info_processed = self.cond_process(cond_info)
+                    cond_info_tiled = torch.tile(cond_info_processed,
+                                                 (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
+                    z = torch.cat((z, cond_info_tiled), dim=1)
                 s = cell(s, z)
                 idx_dec += 1
             else:
@@ -437,9 +457,11 @@ class AutoEncoder(nn.Module):
 
         if self.vanilla_vae:
             # concatenate extra info with sampled latent
-            if info is not None:
-                info = torch.tile(info, (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
-                z = torch.cat((z, info), dim=1)
+            if cond_info is not None:
+                cond_info_processed = self.cond_process(cond_info)
+                cond_info_tiled = torch.tile(cond_info_processed,
+                                             (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
+                z = torch.cat((z, cond_info_tiled), dim=1)
             s = self.stem_decoder(z)
 
         for cell in self.post_process:
@@ -464,7 +486,7 @@ class AutoEncoder(nn.Module):
 
         return logits, log_q, log_p, kl_all, kl_diag
 
-    def sample(self, num_samples, t, info=None):
+    def sample(self, num_samples, t, cond_info=None):
         scale_ind = 0
         z0_size = [num_samples] + self.z0_size
         dist = Normal(mu=torch.zeros(z0_size).cuda(), log_sigma=torch.zeros(z0_size).cuda(), temp=t)
@@ -484,6 +506,11 @@ class AutoEncoder(nn.Module):
                     z, _ = dist.sample()
 
                 # 'combiner_dec'
+                if cond_info is not None:
+                    cond_info_processed = self.cond_process(cond_info)
+                    cond_info_tiled = torch.tile(cond_info_processed,
+                                                 (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
+                    z = torch.cat((z, cond_info_tiled), dim=1)
                 s = cell(s, z)
                 idx_dec += 1
             else:
@@ -493,9 +520,11 @@ class AutoEncoder(nn.Module):
 
         if self.vanilla_vae:
             # concatenate extra info with sampled latent
-            if info is not None:
-                info = torch.tile(info, (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
-                z = torch.cat((z, info), dim=1)
+            if cond_info is not None:
+                cond_info_processed = self.cond_process(cond_info)
+                cond_info_tiled = torch.tile(cond_info_processed,
+                                             (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
+                z = torch.cat((z, cond_info_tiled), dim=1)
             s = self.stem_decoder(z)
 
         for cell in self.post_process:
