@@ -113,9 +113,11 @@ def main(args):
 
         model.eval()
         # generate samples less frequently
-        eval_freq = 1 if args.epochs <= 50 else 20
+        eval_freq = 1 if args.epochs <= 50 else 2  # 20
         if epoch % eval_freq == 0 or epoch == (args.epochs - 1):
-            valid_neg_log_p, valid_nelbo = test(valid_queue, model, num_samples=10, args=args, logging=logging)
+            valid_neg_log_p, valid_nelbo = test(
+                valid_queue, model, num_samples=10, args=args, logging=logging, global_step=global_step, writer=writer
+            )
             logging.info('valid_nelbo %f', valid_nelbo)
             logging.info('valid neg log p %f', valid_neg_log_p)
             logging.info('valid bpd elbo %f', valid_nelbo * bpd_coeff)
@@ -173,7 +175,9 @@ def main(args):
                            os.path.join(args.save, f'checkpoint_{epoch:03d}.pt'))
 
     # Final validation
-    valid_neg_log_p, valid_nelbo = test(valid_queue, model, num_samples=1000, args=args, logging=logging)
+    valid_neg_log_p, valid_nelbo = test(
+        valid_queue, model, num_samples=1000, args=args, logging=logging, global_step=global_step, writer=writer
+    )
     logging.info('final valid nelbo %f', valid_nelbo)
     logging.info('final valid neg log p %f', valid_neg_log_p)
     writer.add_scalar('val/neg_log_p', valid_neg_log_p, epoch + 1)
@@ -246,7 +250,7 @@ def train(train_queue, model, cnn_optimizer, grad_scalar, global_step, warmup_it
         nelbo.update(loss.data, 1)
 
         if (global_step + 1) % 100 == 0:
-            if (global_step + 1) % 1000 == 0:  # reduced frequency
+            if (global_step + 1) % 100 == 0:  # reduced frequency (originally % 1000)
                 n = int(np.floor(np.sqrt(x.size(0))))
                 x_img = x[:n * n]
                 output_img = output.mean if isinstance(output,
@@ -255,7 +259,7 @@ def train(train_queue, model, cnn_optimizer, grad_scalar, global_step, warmup_it
                 x_tiled = utils.tile_image(x_img, n)
                 output_tiled = utils.tile_image(output_img, n)
                 in_out_tiled = torch.cat((x_tiled, output_tiled), dim=2)
-                writer.add_image('reconstruction', in_out_tiled, global_step)
+                writer.add_image('train/reconstruction', in_out_tiled, global_step)
 
             # norm
             writer.add_scalar('train/norm_loss', norm_loss, global_step)
@@ -290,7 +294,7 @@ def train(train_queue, model, cnn_optimizer, grad_scalar, global_step, warmup_it
     return nelbo.avg, global_step
 
 
-def test(valid_queue, model, num_samples, args, logging):
+def test(valid_queue, model, num_samples, args, logging, global_step, writer):
     if args.distributed:
         dist.barrier()
     nelbo_avg = utils.AvgrageMeter()
@@ -307,7 +311,6 @@ def test(valid_queue, model, num_samples, args, logging):
             info = data[1].cuda()
         elif args.cond_robot_type:
             info = data[3].cuda()
-
 
         # change bit length
         x = utils.pre_process(x, args.num_x_bits)
@@ -328,6 +331,17 @@ def test(valid_queue, model, num_samples, args, logging):
 
         nelbo_avg.update(nelbo.data, x.size(0))
         neg_log_p_avg.update(- log_p.data, x.size(0))
+
+        if step == 0:  # reduced frequency
+            n = int(np.floor(np.sqrt(x.size(0))))
+            x_img = x[:n * n]
+            output_img = output.mean if isinstance(output,
+                                                   torch.distributions.bernoulli.Bernoulli) else output.sample()
+            output_img = output_img[:n * n]
+            x_tiled = utils.tile_image(x_img, n)
+            output_tiled = utils.tile_image(output_img, n)
+            in_out_tiled = torch.cat((x_tiled, output_tiled), dim=2)
+            writer.add_image('valid/reconstruction', in_out_tiled, global_step)
 
     utils.average_tensor(nelbo_avg.avg, args.distributed)
     utils.average_tensor(neg_log_p_avg.avg, args.distributed)
