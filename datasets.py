@@ -24,7 +24,7 @@ from thirdparty.lsun import LSUN
 
 
 class XMagicalDataset(Dataset):
-    def __init__(self, data_dir, transform=None, debug=True):
+    def __init__(self, data_dir, transform=None, debug=False):
         """
         Args:
             data_dir: for example, /home/junyao/Datasets/xirl/xmagical/train
