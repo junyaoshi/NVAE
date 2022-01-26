@@ -121,10 +121,14 @@ class AutoEncoder(nn.Module):
         self.vanilla_vae = self.num_latent_scales == 1 and self.num_groups_per_scale == 1
         self.cond_robot_state = args.cond_robot_state
         self.cond_robot_type = args.cond_robot_type
+        self.cond_robot_mask = args.cond_robot_mask
+        self.process_cond_info = args.process_cond_info
         self.cond_info_dim = 0
         if self.cond_robot_type:
             self.cond_info_dim += 4
         if self.cond_robot_state:
+            self.cond_info_dim += 4
+        if self.cond_robot_mask:
             self.cond_info_dim += 4
 
         # encoder parameteres
@@ -181,14 +185,23 @@ class AutoEncoder(nn.Module):
 
         self.image_conditional = self.init_image_conditional(mult)
 
-        if args.process_cond_info:
-            self.cond_process = nn.Sequential(
-                nn.Linear(self.cond_info_dim, 32),
-                nn.ReLU(),
-                nn.Linear(32, 32),
-                nn.ReLU(),
-                nn.Linear(32, self.cond_info_dim)
-            )
+        if self.process_cond_info:
+            if self.cond_robot_mask:
+                self.cond_process = nn.Sequential(
+                    nn.Conv2d(1, 32, 3, 1),
+                    nn.ReLU(),
+                    nn.Conv2d(32, 32, 3, 1),
+                    nn.ReLU(),
+                    nn.Conv2d(32, self.cond_info_dim, 3, 1)
+                )
+            else:
+                self.cond_process = nn.Sequential(
+                    nn.Linear(self.cond_info_dim, 32),
+                    nn.ReLU(),
+                    nn.Linear(32, 32),
+                    nn.ReLU(),
+                    nn.Linear(32, self.cond_info_dim)
+                )
         else:
             self.cond_process = None
 
@@ -446,10 +459,15 @@ class AutoEncoder(nn.Module):
 
                 # 'combiner_dec'
                 if cond_info is not None:
-                    cond_info_processed = self.cond_process(cond_info)
-                    cond_info_tiled = torch.tile(cond_info_processed,
-                                                 (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
-                    z = torch.cat((z, cond_info_tiled), dim=1)
+                    if self.cond_robot_mask:
+                        cond_info_processed = self.cond_process(cond_info)
+                        cond_info_resized = F.interpolate(cond_info_processed, z.size()[-2:])
+                        z = torch.cat((z, cond_info_resized), dim=1)
+                    else:
+                        cond_info_processed = self.cond_process(cond_info)
+                        cond_info_tiled = torch.tile(cond_info_processed,
+                                                     (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
+                        z = torch.cat((z, cond_info_tiled), dim=1)
                 s = cell(s, z)
                 idx_dec += 1
             else:
@@ -458,10 +476,15 @@ class AutoEncoder(nn.Module):
         if self.vanilla_vae:
             # concatenate extra info with sampled latent
             if cond_info is not None:
-                cond_info_processed = self.cond_process(cond_info)
-                cond_info_tiled = torch.tile(cond_info_processed,
-                                             (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
-                z = torch.cat((z, cond_info_tiled), dim=1)
+                if self.cond_robot_mask:
+                    cond_info_processed = self.cond_process(cond_info)
+                    cond_info_resized = F.interpolate(cond_info_processed, z.size()[-2:])
+                    z = torch.cat((z, cond_info_resized), dim=1)
+                else:
+                    cond_info_processed = self.cond_process(cond_info)
+                    cond_info_tiled = torch.tile(cond_info_processed,
+                                                 (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
+                    z = torch.cat((z, cond_info_tiled), dim=1)
             s = self.stem_decoder(z)
 
         for cell in self.post_process:
@@ -507,10 +530,15 @@ class AutoEncoder(nn.Module):
 
                 # 'combiner_dec'
                 if cond_info is not None:
-                    cond_info_processed = self.cond_process(cond_info)
-                    cond_info_tiled = torch.tile(cond_info_processed,
-                                                 (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
-                    z = torch.cat((z, cond_info_tiled), dim=1)
+                    if self.cond_robot_mask:
+                        cond_info_processed = self.cond_process(cond_info)
+                        cond_info_resized = F.interpolate(cond_info_processed, z.size()[-2:])
+                        z = torch.cat((z, cond_info_resized), dim=1)
+                    else:
+                        cond_info_processed = self.cond_process(cond_info)
+                        cond_info_tiled = torch.tile(cond_info_processed,
+                                                     (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
+                        z = torch.cat((z, cond_info_tiled), dim=1)
                 s = cell(s, z)
                 idx_dec += 1
             else:
@@ -521,10 +549,15 @@ class AutoEncoder(nn.Module):
         if self.vanilla_vae:
             # concatenate extra info with sampled latent
             if cond_info is not None:
-                cond_info_processed = self.cond_process(cond_info)
-                cond_info_tiled = torch.tile(cond_info_processed,
-                                             (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
-                z = torch.cat((z, cond_info_tiled), dim=1)
+                if self.cond_robot_mask:
+                    cond_info_processed = self.cond_process(cond_info)
+                    cond_info_resized = F.interpolate(cond_info_processed, z.size()[-2:])
+                    z = torch.cat((z, cond_info_resized), dim=1)
+                else:
+                    cond_info_processed = self.cond_process(cond_info)
+                    cond_info_tiled = torch.tile(cond_info_processed,
+                                                 (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
+                    z = torch.cat((z, cond_info_tiled), dim=1)
             s = self.stem_decoder(z)
 
         for cell in self.post_process:
