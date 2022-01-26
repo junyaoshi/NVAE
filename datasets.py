@@ -24,7 +24,7 @@ from thirdparty.lsun import LSUN
 
 
 class XMagicalDataset(Dataset):
-    def __init__(self, data_dir, transform=None):
+    def __init__(self, data_dir, transform=None, debug=True):
         """
         Args:
             data_dir: for example, /home/junyao/Datasets/xirl/xmagical/train
@@ -33,6 +33,8 @@ class XMagicalDataset(Dataset):
         # get all demo directories
         robot_dirs = [f.path for f in os.scandir(data_dir) if f.is_dir()]
         demo_dirs = [f.path for robot_dir in robot_dirs for f in os.scandir(robot_dir) if f.is_dir()]
+        if debug:
+            demo_dirs = demo_dirs[:3]
 
         self.image_paths = []
         self.robot_states = []
@@ -84,7 +86,35 @@ class XMagicalDataset(Dataset):
         robot_state = self.robot_states[idx].astype(np.float32)
         world_state = self.world_states[idx].astype(np.float32)
         robot_type = self.robot_types[idx].astype(np.float32)
-        return image, robot_state, world_state, robot_type
+
+        rs_x, rs_y, rs_c, rs_s = robot_state  # robot x, y, cos, sin
+        ws_x1, ws_y1, ws_x2, ws_y2, ws_x3, ws_y3 = world_state # world x1, y1, ..., x3, y3
+        n = np.random.choice([0, 1, 2, 3])
+        # rotate 0 degree
+        if n == 0:
+            image_rot = image
+            robot_state_rot = robot_state
+            world_state_rot = world_state
+
+        # rotate 90 degrees
+        elif n == 1:
+            image_rot = torch.rot90(image, k=1, dims=(2, 1))
+            robot_state_rot = np.array([rs_y, -rs_x, rs_s, -rs_c])
+            world_state_rot = np.array([ws_y1, -ws_x1, ws_y2, -ws_x2, ws_y3, -ws_x3])
+
+        # rotate 180 degrees
+        elif n == 2:
+            image_rot = torch.rot90(image, k=2, dims=(2, 1))
+            robot_state_rot = np.array([-rs_x, -rs_y, -rs_c, -rs_s])
+            world_state_rot = np.array([-ws_x1, -ws_y1, -ws_x2, -ws_y2, -ws_x3, -ws_y3])
+
+        # rotate 270 degrees
+        else:
+            image_rot = torch.rot90(image, k=1, dims=(1, 2))
+            robot_state_rot = np.array([-rs_y, rs_x, -rs_s, rs_c])
+            world_state_rot = np.array([-ws_y1, ws_x1, -ws_y2, ws_x2, -ws_y3, ws_x3])
+
+        return image_rot, robot_state_rot, world_state_rot, robot_type
 
 class StackedMNIST(dset.MNIST):
     def __init__(self, root, train=True, transform=None, target_transform=None,
@@ -413,10 +443,10 @@ if __name__ == '__main__':
     data_dir = '/home/junyao/Datasets/xirl/xmagical'
     num_classes = 0
     resize = 64
-    train_transform, valid_transform = _data_transforms_generic(resize)
-    train_data = XMagicalDataset(data_dir=os.path.join(data_dir, 'train'), transform=train_transform)
+    train_transform, valid_transform = _data_transforms_xmagical(resize)
+    train_data = XMagicalDataset(data_dir=os.path.join(data_dir, 'train'), transform=train_transform, debug=False)
     print(f'train length: {len(train_data)}')
-    valid_data = XMagicalDataset(data_dir=os.path.join(data_dir, 'valid'), transform=valid_transform)
+    valid_data = XMagicalDataset(data_dir=os.path.join(data_dir, 'valid'), transform=valid_transform, debug=False)
     print(f'valid length: {len(valid_data)}')
 
     train_sampler, valid_sampler = None, None
@@ -432,6 +462,29 @@ if __name__ == '__main__':
         shuffle=(valid_sampler is None),
         sampler=valid_sampler, pin_memory=True, num_workers=0, drop_last=False)
 
+    import matplotlib.pyplot as plt
+    mask_threshold = 0.91
     for idx, data in enumerate(train_queue):
         image, robot_state, world_state, robot_type = data
-        break
+
+        # test robot mask (mask out everything but the robot)
+        fig, axes = plt.subplots(3, 1, figsize=(5, 15))
+        sample_image = image[0]
+        mask = sample_image[0] < mask_threshold
+        mask = mask.repeat(3, 1, 1)
+        masked_image = sample_image * mask
+        axes[0].imshow(sample_image.permute(1, 2, 0).cpu().numpy())
+        axes[0].set_title('original image')
+        axes[1].imshow(mask.float().permute(1, 2, 0).cpu().numpy())
+        axes[1].set_title('mask')
+        axes[2].imshow(masked_image.permute(1, 2, 0).cpu().numpy())
+        axes[2].set_title('masked image')
+        x, y, c, s = robot_state[0]
+        x1, y1, x2, y2, x3, y3 = world_state[0]
+        fig.suptitle(f'x: {x:.3f} | y: {y:.3f} | c: {c:.3f} | s: {s:.3f}\n'
+                     f'ws: {x1:.3f}, {y1:.3f}, {x2:.3f}, {y2:.3f}, {x3:.3f}, {y3:.3f}')
+        plt.tight_layout()
+        plt.show()
+        plt.close()
+        if idx == 10:
+            break
