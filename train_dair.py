@@ -27,11 +27,15 @@ import datasets
 from fid.fid_score import compute_statistics_of_generator, load_statistics, calculate_frechet_distance
 from fid.inception import InceptionV3
 
+MASK_TRHESHOLD = 0.91
+
 
 def main(args):
     # flag logic check
     if args.process_cond_info:
-        assert args.cond_robot_type or args.cond_robot_state
+        assert args.cond_robot_type or args.cond_robot_state or args.cond_robot_mask
+    if args.cond_robot_mask:
+        assert not (args.cond_robot_type or args.cond_robot_state)
 
     # ensures that weight initializations are all the same
     torch.manual_seed(args.seed)
@@ -52,12 +56,6 @@ def main(args):
 
     model = AutoEncoder(args, writer, arch_instance)
     model = model.cuda()
-
-    # # check that conditional VAE is not hierarchical
-    # if args.cond_robot_state or args.cond_robot_type:
-    #     assert model.vanilla_vae, 'Hierarchical conditional VAE not implemented.'
-    #     assert not args.fast_adamax, 'Using fast_adamax with Vanilla VAE would lead to a bug'
-    # print(f'SANITY CHECK ||| stem decoder: {model.stem_decoder}')
 
     logging.info('args = %s', args)
     logging.info('param size = %fM ', utils.count_parameters_in_M(model))
@@ -154,6 +152,22 @@ def main(args):
                     elif args.cond_robot_type:
                         info = robot_type.cuda()
 
+                if args.cond_robot_mask:
+                    # we need to feed the encoder info in this case
+                    # get num_samples sample from valid_queue
+                    mask = []
+                    samples_count = 0
+                    for _, data in enumerate(valid_queue):
+                        image = data[0]
+                        image_mask = image[:, 0] < MASK_TRHESHOLD
+                        image_mask = image_mask.float().unsqueeze(1)
+                        mask.append(image_mask)
+                        samples_count += data[0].size(0)
+                        if samples_count >= num_samples:
+                            break
+                    mask = torch.vstack(mask)[:num_samples]
+                    info = mask.cuda()
+
                 for t in [0.7, 0.8, 0.9, 1.0]:
                     logits = model.sample(num_samples, t, info)
                     output = model.decoder_output(logits)
@@ -197,6 +211,10 @@ def train(train_queue, model, cnn_optimizer, grad_scalar, global_step, warmup_it
         x = x.cuda()
 
         info = None
+        if args.cond_robot_mask:
+            x_clone = torch.clone(x)
+            mask = x_clone[:, 0] < MASK_TRHESHOLD
+            info = mask.float().unsqueeze(1).cuda()
         if args.cond_robot_state and args.cond_robot_type:
             info = torch.cat((data[1], data[3]), dim=1).cuda()
         elif args.cond_robot_state:
@@ -224,6 +242,7 @@ def train(train_queue, model, cnn_optimizer, grad_scalar, global_step, warmup_it
             output = model.decoder_output(logits)
             kl_coeff = utils.kl_coeff(global_step, args.kl_anneal_portion * args.num_total_iter,
                                       args.kl_const_portion * args.num_total_iter, args.kl_const_coeff)
+            kl_coeff *= args.kl_beta  # multiply kl_coeff by beta to simulate beta VAE
 
             recon_loss = utils.reconstruction_loss(output, x, crop=model.crop_output)
             balanced_kl, kl_coeffs, kl_vals = utils.kl_balancer(kl_all, kl_coeff, kl_balance=True, alpha_i=alpha_i)
@@ -305,6 +324,10 @@ def test(valid_queue, model, num_samples, args, logging, global_step, writer):
         x = x.cuda()
 
         info = None
+        if args.cond_robot_mask:
+            x_clone = torch.clone(x)
+            mask = x_clone[:, 0] < MASK_TRHESHOLD
+            info = mask.float().unsqueeze(1).cuda()
         if args.cond_robot_state and args.cond_robot_type:
             info = torch.cat((data[1], data[3]), dim=1).cuda()
         elif args.cond_robot_state:
@@ -424,9 +447,11 @@ if __name__ == '__main__':
     parser.add_argument('--data', type=str, default='/tmp/nasvae/data',
                         help='location of the data corpus')
     parser.add_argument('--cond_robot_state', action='store_true', default=False,
-                        help='This flag enables conditioning the decoder on robot state')
+                        help='This flag enables using robot state as conditional input of the decoder')
     parser.add_argument('--cond_robot_type', action='store_true', default=False,
-                        help='This flag enables conditioning the decoder on robot type')
+                        help='This flag enables using robot type as conditional input of the decoder')
+    parser.add_argument('--cond_robot_mask', action='store_true', default=False,
+                        help='This flag enables using robot image mask as conditional input of the decoder')
     parser.add_argument('--process_cond_info', action='store_true', default=False,
                         help='This flag creates a small MLP to process conditional input '
                              'before it is passed into the decoder')
@@ -462,6 +487,10 @@ if __name__ == '__main__':
                         help='The portions epochs that KL is constant at kl_const_coeff')
     parser.add_argument('--kl_const_coeff', type=float, default=0.0001,
                         help='The constant value used for min KL coeff')
+    parser.add_argument('--kl_beta', type=float, default=1.0,
+                        help='This value simulates beta in beta VAE. '
+                             'kl_coeff is multiplied by this value at all times')
+
     # Flow params
     parser.add_argument('--num_nf', type=int, default=0,
                         help='The number of normalizing flow cells per groups. Set this to zero to disable flows.')
