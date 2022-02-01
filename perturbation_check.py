@@ -152,8 +152,14 @@ if __name__ == '__main__':
                         help='location of the data corpus')
     parser.add_argument('--eval_on_train', action='store_true', default=False,
                         help='Settings this to true will evaluate the model on training data.')
+
     parser.add_argument('--perturb_state', action='store_true', default=False,
-                        help='If true, perturb robot state. Otherwise, perturb robot type')
+                        help='If true, perturb robot state in the conditional input.')
+    parser.add_argument('--perturb_type', action='store_true', default=False,
+                        help='If true, perturb robot type in the conditional input.')
+    parser.add_argument('--perturb_mask', action='store_true', default=False,
+                        help='If true, perturb robot mask in the conditional input.')
+
     parser.add_argument('--local_rank', type=int, default=0,
                         help='rank of process in the node')
     parser.add_argument('--num_process_per_node', type=int, default=1,
