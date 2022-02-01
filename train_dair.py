@@ -77,9 +77,12 @@ def main(args):
     bpd_coeff = 1. / np.log(2.) / num_output
 
     # if load
-    checkpoint_file = os.path.join(args.save, 'checkpoint.pt')
+    checkpoint_name = sorted([f for f in os.listdir(args.save) if 'checkpoint' in f])[-1]
+    checkpoint_file = os.path.join(args.save, checkpoint_name)
+    # checkpoint_file = os.path.join(args.save, 'checkpoint.pt')
     if args.cont_training:
         logging.info('loading the model.')
+        logging.info(f'loading checkpoint: {checkpoint_file}')
         checkpoint = torch.load(checkpoint_file, map_location='cpu')
         init_epoch = checkpoint['epoch']
         model.load_state_dict(checkpoint['state_dict'])
