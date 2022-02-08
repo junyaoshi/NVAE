@@ -99,6 +99,7 @@ class LinearProbe(nn.Module):
     def __init__(
             self,
             vae,
+            adversary: bool = False,
             num_features: int = 2,
             latent_dim: int = 1,
             conditional: bool = True,
@@ -106,6 +107,7 @@ class LinearProbe(nn.Module):
     ):
         super(LinearProbe, self).__init__()
         self.vae = vae
+        self.adversary = adversary
         self.conditional = conditional
         self.latent_dim = latent_dim
         self.num_features = num_features
@@ -140,9 +142,15 @@ class LinearProbe(nn.Module):
 
     def forward(self, x):
         # encoding
-        with torch.no_grad():
+        if self.adversary:
+            self.vae.train()
             x = self.vae.encoder(x)
             mu = self.vae.fc_mu(x)
+        else:
+            self.vae.eval()
+            with torch.no_grad():
+                x = self.vae.encoder(x)
+                mu = self.vae.fc_mu(x)
 
         # decoding
         if self.conditional:

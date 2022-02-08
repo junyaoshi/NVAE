@@ -41,6 +41,8 @@ parser.add_argument('--conditional', action='store_true', default=False,
                     help='enables conditional VAE')
 parser.add_argument('--cond_dim', type=int, default=1,
                     help='dimension of conditional input (when VAE is conditional)')
+parser.add_argument('--adversary', action='store_true', default=False,
+                    help='enables adversarial discriminator loss')
 parser.add_argument('--debug', action='store_true', default=False,
                     help='enables debugging mode, set num_workers=0 to allow for break points')
 
@@ -68,6 +70,16 @@ probe = LinearProbe(
 ).to(device)
 vae_optimizer = optim.Adam(model.parameters(), lr=args.vae_lr)
 probe_optimizer = optim.Adam(probe.parameters(), lr=args.probe_lr)
+if args.adversary:
+    discriminator = LinearProbe(
+        vae=None,
+        num_features=args.num_features,
+        latent_dim=args.latent_dim,
+        conditional=args.conditional,
+        cond_dim=args.cond_dim
+    ).to(device)
+    disc_optimizer = optim.Adam(discriminator.parameters(), lr=args.probe_lr)
+    discriminator.vae = model
 mse_loss = nn.MSELoss(reduction='sum')
 
 train_dataset = ToyRandomDataset(num_data=int(2e4), num_features=args.num_features)
@@ -105,16 +117,49 @@ def train(epoch):
     for idx, data in tqdm(enumerate(train_queue), desc=f"VAE | Epoch {epoch} | Iterating through train dataset..."):
         data = data.to(device)
         vae_optimizer.zero_grad()
+        if args.adversary:
+            disc_optimizer.zero_grad()
         cond_input = None
         if args.conditional:
             cond_input = data[:, -args.cond_dim:]
         recon, mu, log_var = model(data, cond_input)
 
-        # calculate and propogate loss
+        # calculate and propogate vae loss
         recon_loss = model.recon_loss(recon, data)
         kld_loss = model.kld_loss(mu, log_var)
         loss = recon_loss + model.beta * kld_loss
         loss.backward()
+        vae_optimizer.step()
+
+        # calcaulte and propogate discriminator loss
+        vae_optimizer.zero_grad()
+        disc_optimizer.zero_grad()
+        disc_cond_out, disc_noncond_out = discriminator(data)
+        cond_gt, noncond_gt = None, data
+        cond_loss = None
+        if args.conditional:
+            cond_gt, noncond_gt = data[:, -args.cond_dim:], data[:, :-args.cond_dim]
+            cond_loss = mse_loss(disc_cond_out, cond_gt)
+
+        # positive gradient backprop for discriminator
+        if cond_loss is not None:
+            cond_loss.backward()
+        noncond_loss = mse_loss(disc_noncond_out, noncond_gt)
+        noncond_loss.backward()
+        disc_optimizer.step()
+
+        # negative gradient backprop for vae
+        vae_optimizer.zero_grad()
+        cond_loss = None
+        if args.conditional:
+            cond_gt, noncond_gt = data[:, -args.cond_dim:], data[:, :-args.cond_dim]
+            cond_loss = -mse_loss(disc_cond_out, cond_gt)
+
+        # positive gradient backprop for discriminator
+        if cond_loss is not None:
+            cond_loss.backward()
+        noncond_loss = -mse_loss(disc_noncond_out, noncond_gt)
+        noncond_loss.backward()
         vae_optimizer.step()
 
         # calculate baseline loss
