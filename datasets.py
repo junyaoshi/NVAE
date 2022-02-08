@@ -6,7 +6,7 @@
 # ---------------------------------------------------------------
 
 """Code for getting the data loaders."""
-
+import random
 import numpy as np
 from PIL import Image
 import torch
@@ -21,6 +21,40 @@ import glob
 from tqdm import tqdm
 from lmdb_datasets import LMDBDataset
 from thirdparty.lsun import LSUN
+
+
+class SomethingSomething(Dataset):
+    def __init__(self, data_dir, train=True, transform=None, debug=False):
+        """
+        Args:
+            data_dir: for example, /home/junyao/Datasets/xirl/xmagical/train
+        """
+        self.transform = transform
+        self.train = train
+        # get all demo directories
+        videos = [data_dir + x + '/' for x in data_dir]
+        random.shuffle(videos)
+        self.image_paths = []
+        if self.train:
+            videos = videos[0:5100]
+        else:
+            videos = videos[5100:]
+        if debug:
+            if self.train:
+                videos = videos[:3]
+            else:
+                videos = videos[3:6]
+        for v in videos:
+            im = [v+x for x in os.listdir(v)]
+            self.image_paths.extend(im)
+    def __len__(self):
+        return len(self.image_paths)
+    def __getitem__(self, idx):
+        image_path = self.image_paths[idx]
+        image = Image.open(image_path)
+        if self.transform is not None:
+            image = self.transform(image)
+        return image
 
 
 class XMagicalDataset(Dataset):
@@ -312,6 +346,12 @@ def get_loaders_eval(dataset, args):
         valid_data = XMagicalDataset(
             data_dir=os.path.join(args.data, 'valid'), transform=valid_transform, debug=args.debug
         )
+    elif dataset == 'something-something':
+        num_classes = 0
+        resize = 64
+        train_transform, valid_transform = _data_transforms_something_something(resize)
+        train_data = SomethingSomething(data_dir=args.data, train=True, transform=train_transform, debug=args.debug)
+        valid_data = SomethingSomething(data_dir=args.data, train=False, transform=valid_transform, debug=args.debug)
     else:
         raise NotImplementedError
 
@@ -437,6 +477,20 @@ def _data_transforms_xmagical(size):
 
     valid_transform = transforms.Compose([
         transforms.Resize(size),
+        transforms.ToTensor(),
+    ])
+
+    return train_transform, valid_transform
+
+
+def _data_transforms_something_something(size):
+    train_transform = transforms.Compose([
+        transforms.Resize((size, size)),
+        transforms.ToTensor(),
+    ])
+
+    valid_transform = transforms.Compose([
+        transforms.Resize((size, size)),
         transforms.ToTensor(),
     ])
 

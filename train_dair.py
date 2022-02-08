@@ -114,7 +114,7 @@ def main(args):
 
         model.eval()
         # generate samples less frequently
-        eval_freq = 1 if args.epochs <= 50 else 2  # 20
+        eval_freq = 1 # if args.epochs <= 50 else 2  # 20
         if epoch % eval_freq == 0 or epoch == (args.epochs - 1):
             valid_neg_log_p, valid_nelbo = test(
                 valid_queue, model, num_samples=10, args=args, logging=logging, global_step=global_step, writer=writer
@@ -445,7 +445,7 @@ if __name__ == '__main__':
     parser.add_argument('--dataset', type=str, default='mnist',
                         choices=['cifar10', 'mnist', 'omniglot', 'celeba_64', 'celeba_256',
                                  'imagenet_32', 'ffhq', 'lsun_bedroom_128', 'stacked_mnist',
-                                 'lsun_church_128', 'lsun_church_64', 'xmagical'],
+                                 'lsun_church_128', 'lsun_church_64', 'xmagical', 'something-something'],
                         help='which dataset to use')
     parser.add_argument('--data', type=str, default='/tmp/nasvae/data',
                         help='location of the data corpus')
