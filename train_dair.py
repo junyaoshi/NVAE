@@ -27,7 +27,7 @@ import datasets
 from fid.fid_score import compute_statistics_of_generator, load_statistics, calculate_frechet_distance
 from fid.inception import InceptionV3
 
-MASK_TRHESHOLD = 0.91
+MASK_THRESHOLD = 0.91
 
 
 def main(args):
@@ -77,10 +77,10 @@ def main(args):
     bpd_coeff = 1. / np.log(2.) / num_output
 
     # if load
-    checkpoint_name = sorted([f for f in os.listdir(args.save) if 'checkpoint' in f])[-1]
-    checkpoint_file = os.path.join(args.save, checkpoint_name)
-    # checkpoint_file = os.path.join(args.save, 'checkpoint.pt')
     if args.cont_training:
+        checkpoint_name = sorted([f for f in os.listdir(args.save) if 'checkpoint' in f])[-1]
+        checkpoint_file = os.path.join(args.save, checkpoint_name)
+        # checkpoint_file = os.path.join(args.save, 'checkpoint.pt')
         logging.info('loading the model.')
         logging.info(f'loading checkpoint: {checkpoint_file}')
         checkpoint = torch.load(checkpoint_file, map_location='cpu')
@@ -162,7 +162,7 @@ def main(args):
                     samples_count = 0
                     for _, data in enumerate(valid_queue):
                         image = data[0]
-                        image_mask = image[:, 0] < MASK_TRHESHOLD
+                        image_mask = image[:, 0] < MASK_THRESHOLD
                         image_mask = image_mask.float().unsqueeze(1)
                         mask.append(image_mask)
                         samples_count += data[0].size(0)
@@ -216,7 +216,7 @@ def train(train_queue, model, cnn_optimizer, grad_scalar, global_step, warmup_it
         info = None
         if args.cond_robot_mask:
             x_clone = torch.clone(x)
-            mask = x_clone[:, 0] < MASK_TRHESHOLD
+            mask = x_clone[:, 0] < MASK_THRESHOLD
             info = mask.float().unsqueeze(1).cuda()
         if args.cond_robot_state and args.cond_robot_type:
             info = torch.cat((data[1], data[3]), dim=1).cuda()
@@ -329,7 +329,7 @@ def test(valid_queue, model, num_samples, args, logging, global_step, writer):
         info = None
         if args.cond_robot_mask:
             x_clone = torch.clone(x)
-            mask = x_clone[:, 0] < MASK_TRHESHOLD
+            mask = x_clone[:, 0] < MASK_THRESHOLD
             info = mask.float().unsqueeze(1).cuda()
         if args.cond_robot_state and args.cond_robot_type:
             info = torch.cat((data[1], data[3]), dim=1).cuda()
