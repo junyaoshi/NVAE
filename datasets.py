@@ -306,8 +306,12 @@ def get_loaders_eval(dataset, args):
         num_classes = 0
         resize = 64
         train_transform, valid_transform = _data_transforms_xmagical(resize)
-        train_data = XMagicalDataset(data_dir=os.path.join(args.data, 'train'), transform=train_transform)
-        valid_data = XMagicalDataset(data_dir=os.path.join(args.data, 'valid'), transform=valid_transform)
+        train_data = XMagicalDataset(
+            data_dir=os.path.join(args.data, 'train'), transform=train_transform, debug=args.debug
+        )
+        valid_data = XMagicalDataset(
+            data_dir=os.path.join(args.data, 'valid'), transform=valid_transform, debug=args.debug
+        )
     else:
         raise NotImplementedError
 
