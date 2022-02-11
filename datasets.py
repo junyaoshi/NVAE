@@ -32,7 +32,7 @@ class SomethingSomething(Dataset):
         self.transform = transform
         self.train = train
         # get all demo directories
-        videos = [data_dir + x + '/' for x in data_dir]
+        videos = [data_dir + x + '/' for x in os.listdir(data_dir)]
         random.shuffle(videos)
         self.image_paths = []
         if self.train:
@@ -44,17 +44,21 @@ class SomethingSomething(Dataset):
                 videos = videos[:3]
             else:
                 videos = videos[3:6]
+        print('Fetching image paths...')
         for v in videos:
             im = [v+x for x in os.listdir(v)]
             self.image_paths.extend(im)
+        print('Fetching image paths: done.')
+
     def __len__(self):
         return len(self.image_paths)
+
     def __getitem__(self, idx):
         image_path = self.image_paths[idx]
         image = Image.open(image_path)
         if self.transform is not None:
             image = self.transform(image)
-        return image
+        return image, 0., 0., 0.
 
 
 class XMagicalDataset(Dataset):
@@ -360,15 +364,17 @@ def get_loaders_eval(dataset, args):
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_data)
         valid_sampler = torch.utils.data.distributed.DistributedSampler(valid_data)
 
+    print('Creating data loaders...')
     train_queue = torch.utils.data.DataLoader(
         train_data, batch_size=args.batch_size,
         shuffle=(train_sampler is None),
-        sampler=train_sampler, pin_memory=True, num_workers=0 if args.debug else 8, drop_last=True)
+        sampler=train_sampler, pin_memory=True, num_workers=0 if args.debug else args.num_workers, drop_last=True)
 
     valid_queue = torch.utils.data.DataLoader(
         valid_data, batch_size=args.batch_size,
         shuffle=(valid_sampler is None),
-        sampler=valid_sampler, pin_memory=True, num_workers=0 if args.debug else 1, drop_last=False)
+        sampler=valid_sampler, pin_memory=True, num_workers=0 if args.debug else args.num_workers, drop_last=False)
+    print('Creating data loaders: done')
 
     return train_queue, valid_queue, num_classes
 
