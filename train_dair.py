@@ -114,7 +114,7 @@ def main(args):
 
         model.eval()
         # generate samples less frequently
-        eval_freq = 1 # if args.epochs <= 50 else 2  # 20
+        eval_freq = 1  # if args.epochs <= 50 else 2  # 20
         if epoch % eval_freq == 0 or epoch == (args.epochs - 1):
             valid_neg_log_p, valid_nelbo = test(
                 valid_queue, model, num_samples=10, args=args, logging=logging, global_step=global_step, writer=writer
@@ -181,7 +181,7 @@ def main(args):
                     output_tiled = utils.tile_image(output_img, n)
                     writer.add_image('generated_%0.1f' % t, output_tiled, global_step)
 
-        save_freq = int(np.ceil(args.epochs / 100))
+        save_freq = 1 # int(np.ceil(args.epochs / 100))
         if epoch % save_freq == 0 or epoch == (args.epochs - 1):
             if args.global_rank == 0:
                 logging.info('saving the model.')
@@ -449,6 +449,8 @@ if __name__ == '__main__':
                         help='which dataset to use')
     parser.add_argument('--data', type=str, default='/tmp/nasvae/data',
                         help='location of the data corpus')
+    parser.add_argument('--num_workers', type=int, default=8,
+                        help='number of workers for dataloaders')
     parser.add_argument('--cond_robot_state', action='store_true', default=False,
                         help='This flag enables using robot state as conditional input of the decoder')
     parser.add_argument('--cond_robot_type', action='store_true', default=False,
