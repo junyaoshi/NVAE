@@ -325,7 +325,7 @@ class AutoEncoder(nn.Module):
                         dec_tower.append(cell)
 
                 cell = DecCombinerCell(
-                    num_c + self.cond_info_dim, self.num_latent_per_group, num_c, cell_type='combiner_dec'
+                    num_c, self.num_latent_per_group, num_c, cell_type='combiner_dec'
                 )
                 dec_tower.append(cell)
 
@@ -342,6 +342,12 @@ class AutoEncoder(nn.Module):
 
     def init_post_process(self, mult):
         post_process = nn.ModuleList()
+        if self.cond_info_dim > 0:
+            num_c = int(self.num_channels_dec * mult)
+            cell = DecCombinerCell(
+               self.cond_info_dim, num_c, num_c, cell_type='combiner_dec'
+            )
+            post_process.append(cell)
         for b in range(self.num_postprocess_blocks):
             for c in range(self.num_postprocess_cells):
                 if c == 0:
@@ -458,16 +464,6 @@ class AutoEncoder(nn.Module):
                     all_log_p.append(log_p_conv)
 
                 # 'combiner_dec'
-                if cond_info is not None:
-                    if self.cond_robot_mask:
-                        cond_info_processed = self.cond_process(cond_info)
-                        cond_info_resized = F.interpolate(cond_info_processed, z.size()[-2:])
-                        z = torch.cat((z, cond_info_resized), dim=1)
-                    else:
-                        cond_info_processed = self.cond_process(cond_info)
-                        cond_info_tiled = torch.tile(cond_info_processed,
-                                                     (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
-                        z = torch.cat((z, cond_info_tiled), dim=1)
                 s = cell(s, z)
                 idx_dec += 1
             else:
@@ -478,17 +474,29 @@ class AutoEncoder(nn.Module):
             if cond_info is not None:
                 if self.cond_robot_mask:
                     cond_info_processed = self.cond_process(cond_info)
-                    cond_info_resized = F.interpolate(cond_info_processed, z.size()[-2:])
-                    z = torch.cat((z, cond_info_resized), dim=1)
+                    cond_info_processed = F.interpolate(cond_info_processed, z.size()[-2:])
+                    z = torch.cat((z, cond_info_processed), dim=1)
                 else:
                     cond_info_processed = self.cond_process(cond_info)
-                    cond_info_tiled = torch.tile(cond_info_processed,
+                    cond_info_processed = torch.tile(cond_info_processed,
                                                  (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
-                    z = torch.cat((z, cond_info_tiled), dim=1)
+                    z = torch.cat((z, cond_info_processed), dim=1)
             s = self.stem_decoder(z)
 
+        if cond_info is not None:
+            if self.cond_robot_mask:
+                cond_info_processed = self.cond_process(cond_info)
+                cond_info_processed = F.interpolate(cond_info_processed, s.size()[-2:])
+            else:
+                cond_info_processed = self.cond_process(cond_info)
+                cond_info_processed = torch.tile(cond_info_processed,
+                                             (s.size(-2), s.size(-1), 1, 1)).permute((-2, -1, 0, 1))
         for cell in self.post_process:
-            s = cell(s)
+            if cell.cell_type == 'combiner_dec':
+                # 'combiner_dec', combines conditional info with decoder tower output
+                s = cell(s, cond_info_processed)
+            else:
+                s = cell(s)
 
         logits = self.image_conditional(s)
 
@@ -529,16 +537,6 @@ class AutoEncoder(nn.Module):
                     z, _ = dist.sample()
 
                 # 'combiner_dec'
-                if cond_info is not None:
-                    if self.cond_robot_mask:
-                        cond_info_processed = self.cond_process(cond_info)
-                        cond_info_resized = F.interpolate(cond_info_processed, z.size()[-2:])
-                        z = torch.cat((z, cond_info_resized), dim=1)
-                    else:
-                        cond_info_processed = self.cond_process(cond_info)
-                        cond_info_tiled = torch.tile(cond_info_processed,
-                                                     (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
-                        z = torch.cat((z, cond_info_tiled), dim=1)
                 s = cell(s, z)
                 idx_dec += 1
             else:
@@ -551,17 +549,29 @@ class AutoEncoder(nn.Module):
             if cond_info is not None:
                 if self.cond_robot_mask:
                     cond_info_processed = self.cond_process(cond_info)
-                    cond_info_resized = F.interpolate(cond_info_processed, z.size()[-2:])
-                    z = torch.cat((z, cond_info_resized), dim=1)
+                    cond_info_processed = F.interpolate(cond_info_processed, z.size()[-2:])
+                    z = torch.cat((z, cond_info_processed), dim=1)
                 else:
                     cond_info_processed = self.cond_process(cond_info)
-                    cond_info_tiled = torch.tile(cond_info_processed,
+                    cond_info_processed = torch.tile(cond_info_processed,
                                                  (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
-                    z = torch.cat((z, cond_info_tiled), dim=1)
+                    z = torch.cat((z, cond_info_processed), dim=1)
             s = self.stem_decoder(z)
 
+        if cond_info is not None:
+            if self.cond_robot_mask:
+                cond_info_processed = self.cond_process(cond_info)
+                cond_info_processed = F.interpolate(cond_info_processed, s.size()[-2:])
+            else:
+                cond_info_processed = self.cond_process(cond_info)
+                cond_info_processed = torch.tile(cond_info_processed,
+                                             (s.size(-2), s.size(-1), 1, 1)).permute((-2, -1, 0, 1))
         for cell in self.post_process:
-            s = cell(s)
+            if cell.cell_type == 'combiner_dec':
+                # 'combiner_dec', combines conditional info with decoder tower output
+                s = cell(s, cond_info_processed)
+            else:
+                s = cell(s)
 
         logits = self.image_conditional(s)
         return logits
