@@ -136,12 +136,12 @@ def train(epoch):
         disc_optimizer.zero_grad()
         disc_cond_out, disc_noncond_out = discriminator(data)
         cond_gt, noncond_gt = None, data
+
+        # positive gradient backprop for discriminator
         cond_loss = None
         if args.conditional:
             cond_gt, noncond_gt = data[:, -args.cond_dim:], data[:, :-args.cond_dim]
             cond_loss = mse_loss(disc_cond_out, cond_gt)
-
-        # positive gradient backprop for discriminator
         if cond_loss is not None:
             cond_loss.backward()
         noncond_loss = mse_loss(disc_noncond_out, noncond_gt)
@@ -154,8 +154,6 @@ def train(epoch):
         if args.conditional:
             cond_gt, noncond_gt = data[:, -args.cond_dim:], data[:, :-args.cond_dim]
             cond_loss = -mse_loss(disc_cond_out, cond_gt)
-
-        # positive gradient backprop for discriminator
         if cond_loss is not None:
             cond_loss.backward()
         noncond_loss = -mse_loss(disc_noncond_out, noncond_gt)
@@ -172,6 +170,8 @@ def train(epoch):
         train_writer.add_scalar('VAE_Loss/kl_divergence', kld_loss.item(), vae_global_step)
         train_writer.add_scalar('VAE_Loss/total_loss', loss.item(), vae_global_step)
         train_writer.add_scalar('VAE_Loss/beta', model.beta, vae_global_step)
+        train_writer.add_scalar('Discriminator_loss/cond_loss', cond_loss.item(), vae_global_step)
+        train_writer.add_scalar('Discriminator_loss/noncond_loss', noncond_loss.item(), vae_global_step)
 
         total_loss += loss.item()
         total_kld_loss += kld_loss.item()
