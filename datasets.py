@@ -17,7 +17,7 @@ from scipy.io import loadmat
 import os
 import json
 import urllib
-import glob
+import pickle
 from tqdm import tqdm
 from lmdb_datasets import LMDBDataset
 from thirdparty.lsun import LSUN
@@ -27,38 +27,76 @@ class SomethingSomething(Dataset):
     def __init__(self, data_dir, train=True, transform=None, debug=False):
         """
         Args:
-            data_dir: for example, /home/junyao/Datasets/xirl/xmagical/train
+            data_dir = '/scratch/agelosk/Hands/something_something_paths.pkl'
         """
         self.transform = transform
         self.train = train
         # get all demo directories
-        videos = [data_dir + x + '/' for x in os.listdir(data_dir)]
-        random.shuffle(videos)
+
         self.image_paths = []
+        self.hand_paths = []
+        with open(data_dir, 'rb') as f:
+            temp = pickle.load(f)
+        random.shuffle(temp)
+        self.image_paths, self.hand_paths = zip(*temp)
+
         if self.train:
-            videos = videos[0:5100]
+            print("Total size of dataset:", len(self.image_paths), "images")
+
+        if self.train:
+            self.image_paths = self.image_paths[0:int(len(self.image_paths) * 0.9)]
+            self.hand_paths = self.hand_paths[0:int(len(self.hand_paths) * 0.9)]
         else:
-            videos = videos[5100:]
+            self.image_paths = self.image_paths[int(len(self.image_paths) * 0.9):]
+            self.hand_paths = self.hand_paths[int(len(self.hand_paths) * 0.9):]
         if debug:
             if self.train:
-                videos = videos[:3]
+                self.image_paths = self.image_paths[0:50]
+                self.hand_paths = self.hand_paths[0:50]
             else:
-                videos = videos[3:6]
-        print('Fetching image paths...')
-        for v in videos:
-            im = [v+x for x in os.listdir(v)]
-            self.image_paths.extend(im)
-        print('Fetching image paths: done.')
+                self.image_paths = self.image_paths[50:75]
+                self.hand_paths = self.hand_paths[50:75]
+
+        assert len(self.image_paths) == len(self.hand_paths)
+
+        if self.train:
+            print("Training set has:     ", len(self.image_paths), "images")
+        else:
+            print("Validation set has:   ", len(self.image_paths), "images")
 
     def __len__(self):
         return len(self.image_paths)
 
     def __getitem__(self, idx):
         image_path = self.image_paths[idx]
-        image = Image.open(image_path)
+        hand_path = self.hand_paths[idx]
+        img = Image.open(image_path)
+        w, h = img.size
+
+        bbs = pickle.load(open(hand_path, 'rb'))
+        hand = bbs['pred_output_list'][0]['left_hand'] if len(bbs['pred_output_list'][0]['left_hand']) > 0 \
+            else bbs['pred_output_list'][0]['right_hand']
+        hand_bb = bbs['hand_bbox_list'][0]['left_hand'] if bbs['hand_bbox_list'][0]['left_hand'] is not None \
+            else bbs['hand_bbox_list'][0]['right_hand']
+        params_3d = hand['pred_joints_smpl'].reshape(63)
+        # cropped_hand = np.array(img.crop((hand_bb[0],hand_bb[1],hand_bb[0]+hand_bb[2],hand_bb[1]+hand_bb[3])))
+
+        mask = np.zeros((np.array(img).shape), np.uint8)
+        mask[hand_bb[1]:hand_bb[1] + hand_bb[3], hand_bb[0]:hand_bb[0] + hand_bb[2]] = \
+            np.array(img)[hand_bb[1]:hand_bb[1] + hand_bb[3], hand_bb[0]:hand_bb[0] + hand_bb[2]]
+        mask = Image.fromarray(mask)
+
         if self.transform is not None:
-            image = self.transform(image)
-        return image, 0., 0., 0.
+            image = self.transform(img)
+            mask = self.transform(mask)
+        hand_bb = np.array([hand_bb[0] / w, hand_bb[1] / h, hand_bb[2] / w, hand_bb[3] / h]).astype(np.float32)
+
+        # Dataloader returns:
+        #   1. image: Frame from something-something dataset of shape given by self.transform
+        #   2. params_3d: 63 features produced by 3D Hand Reconstruction
+        #   3. hand_bb: 4 numbers in the form [x,y,w,h] that indicate the position of the hand in the image.
+        #   4. mask: Image of the cropped hand according to hand_bb padded on the size of the image.
+        return image, params_3d, hand_bb, mask
 
 
 class XMagicalDataset(Dataset):
@@ -373,7 +411,7 @@ def get_loaders_eval(dataset, args):
     valid_queue = torch.utils.data.DataLoader(
         valid_data, batch_size=args.batch_size,
         shuffle=(valid_sampler is None),
-        sampler=valid_sampler, pin_memory=True, num_workers=0 if args.debug else args.num_workers, drop_last=False)
+        sampler=valid_sampler, pin_memory=True, num_workers=0 if args.debug else args.num_workers, drop_last=True)
     print('Creating data loaders: done')
 
     return train_queue, valid_queue, num_classes
@@ -508,9 +546,9 @@ if __name__ == '__main__':
     num_classes = 0
     resize = 64
     train_transform, valid_transform = _data_transforms_xmagical(resize)
-    train_data = XMagicalDataset(data_dir=os.path.join(data_dir, 'train'), transform=train_transform, debug=False)
+    train_data = XMagicalDataset(data_dir=os.path.join(data_dir, 'train'), transform=train_transform, debug=True)
     print(f'train length: {len(train_data)}')
-    valid_data = XMagicalDataset(data_dir=os.path.join(data_dir, 'valid'), transform=valid_transform, debug=False)
+    valid_data = XMagicalDataset(data_dir=os.path.join(data_dir, 'valid'), transform=valid_transform, debug=True)
     print(f'valid length: {len(valid_data)}')
 
     train_sampler, valid_sampler = None, None
@@ -524,7 +562,7 @@ if __name__ == '__main__':
     valid_queue = torch.utils.data.DataLoader(
         valid_data, batch_size=batch_size,
         shuffle=(valid_sampler is None),
-        sampler=valid_sampler, pin_memory=True, num_workers=0, drop_last=False)
+        sampler=valid_sampler, pin_memory=True, num_workers=0, drop_last=True)
 
     import matplotlib.pyplot as plt
     mask_threshold = 0.91
@@ -535,6 +573,13 @@ if __name__ == '__main__':
         fig, axes = plt.subplots(3, 1, figsize=(5, 15))
         sample_image = image[0]
         mask = sample_image[0] < mask_threshold
+
+        # ignore grey pixels on the edge
+        mask[0] = False
+        mask[-1] = False
+        mask[:, 0] = False
+        mask[:, -1] = False
+
         mask = mask.repeat(3, 1, 1)
         masked_image = sample_image * mask
         axes[0].imshow(sample_image.permute(1, 2, 0).cpu().numpy())
