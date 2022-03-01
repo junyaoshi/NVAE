@@ -7,7 +7,6 @@ import torch.distributed as dist
 from torch import optim
 from torch.utils.tensorboard.writer import SummaryWriter
 from tqdm import tqdm
-import numpy as np
 
 from model import AutoEncoder
 from probe_model import Probe
@@ -20,12 +19,13 @@ ce_loss = nn.CrossEntropyLoss()
 
 
 def main(eval_args):
+    device = torch.device("cuda")
+
     # load a checkpoint
     print('loading the model at:')
     print(eval_args.checkpoint)
     checkpoint = torch.load(eval_args.checkpoint, map_location='cpu')
     args = checkpoint['args']
-    device = torch.device("cuda")
 
     # check flags
     if not hasattr(args, 'ada_groups'):
@@ -41,6 +41,8 @@ def main(eval_args):
     # laod VAE
     print(f'loaded the model at epoch {checkpoint["epoch"]}')
     arch_instance = utils.get_arch_cells(args.arch_instance)
+    if args.dataset == 'xmagical':
+        args.cond_hand = False
     vae = AutoEncoder(args, None, arch_instance)
     # Loading is not strict because of self.weight_normalized in Conv2D class in neural_operations. This variable
     # is only used for computing the spectral normalization and it is safe not to load it. Some of our earlier models
@@ -53,19 +55,30 @@ def main(eval_args):
     print('args = %s', args)
     print('vae num conv layers: %d', len(vae.all_conv_layers))
     print('vae param size = %fM ', utils.count_parameters_in_M(vae))
+    print(f'vae hierarchical: {not vae.vanilla_vae}')
+    print(f'baseline mode: {eval_args.baseline_mode}')
 
     # initialize probe
     ws_probe = Probe(
         vae=None,
+        vanilla_vae=vae.vanilla_vae,
+        baseline_mode=eval_args.baseline_mode,
         output_dim=6,
+        device=device
     ).to(device)  # world state probe
     rs_probe = Probe(
         vae=None,
+        vanilla_vae=vae.vanilla_vae,
+        baseline_mode=eval_args.baseline_mode,
         output_dim=4,
+        device=device
     ).to(device)  # robot state probe
     rt_probe = Probe(
         vae=None,
+        vanilla_vae=vae.vanilla_vae,
+        baseline_mode=eval_args.baseline_mode,
         output_dim=4,
+        device=device
     ).to(device)  # robot type probe
 
     # optimizer
@@ -84,6 +97,7 @@ def main(eval_args):
     args.data = eval_args.data
     args.batch_size = eval_args.batch_size
     args.debug = eval_args.debug
+    args.num_workers = eval_args.num_workers
     train_queue, valid_queue, num_classes = datasets.get_loaders(args)
 
     # tensorboard writer
@@ -164,12 +178,12 @@ def train(queue, probes, optimizers, global_step, writer, device, args, eval_arg
             optimizer.step()
 
         # calculate baseline losses
-        bl_ws = torch.zeros_like(ws_out)
-        bl_rs = torch.zeros_like(rs_out)
+        bl_ws = torch.mean(world_state, dim=0).repeat(eval_args.batch_size, 1).to(device)
+        bl_rs = torch.mean(robot_state, dim=0).repeat(eval_args.batch_size, 1).to(device)
         bl_rt = F.one_hot(
-            torch.tensor([np.random.randint(4, size=rt_out.size(0))], device=device).squeeze(),
+            torch.randint(0, 4, (rt_out.size(0),)),
             num_classes=4
-        ).float()
+        ).float().to(device)
 
         if eval_args.matching_loss:
             bl_ws_loss_min = torch.inf
@@ -235,12 +249,12 @@ def test(queue, probes, global_step, writer, device, args, eval_args):
             rt_loss = ce_loss(rt_out, robot_type)
 
             # calculate baseline losses
-            bl_ws = torch.zeros_like(ws_out)
-            bl_rs = torch.zeros_like(rs_out)
+            bl_ws = torch.mean(world_state, dim=0).repeat(eval_args.batch_size, 1).to(device)
+            bl_rs = torch.mean(robot_state, dim=0).repeat(eval_args.batch_size, 1).to(device)
             bl_rt = F.one_hot(
-                torch.tensor([np.random.randint(4, size=rt_out.size(0))], device=device).squeeze(),
+                torch.randint(0, 4, (rt_out.size(0),)),
                 num_classes=4
-            ).float()
+            ).float().to(device)
 
             if eval_args.matching_loss:
                 bl_ws_loss_min = torch.inf
@@ -299,6 +313,10 @@ if __name__ == '__main__':
                         help='batch size per GPU')
     parser.add_argument('--matching_loss', action='store_true', default=False,
                         help='enables matching loss for world state')
+    parser.add_argument('--baseline_mode', action='store_true', default=False,
+                        help='runs the probe in baseline, with all 0s as input to the decoder')
+    parser.add_argument('--num_workers', type=int, default=8,
+                        help='number of workers for dataloaders')
     parser.add_argument('--debug', action='store_true', default=False,
                         help='enables debugging mode, set num_workers=0 to allow for break points')
 
