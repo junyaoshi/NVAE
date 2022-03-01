@@ -31,6 +31,7 @@ def main(eval_args):
     if not hasattr(args, 'num_mixture_dec'):
         print('old model, no num_mixture_dec was found.')
         args.num_mixture_dec = 10
+
     perturb_type = None
     if eval_args.perturb_state:
         perturb_type = 'robot_state'
@@ -44,9 +45,22 @@ def main(eval_args):
         perturb_type = 'robot_mask'
         assert not eval_args.perturb_type and not eval_args.perturb_state
         assert args.cond_robot_mask
+    if eval_args.perturb_hand:
+        perturb_type = 'hand'
+        assert not (eval_args.perturb_type or eval_args.perturb_state or eval_args.perturb_mask)
+        assert args.cond_hand
+    print(f'Perturbing: {perturb_type}')
+    assert args.cond_robot_state or args.cond_robot_type or args.cond_robot_mask or args.cond_hand, \
+        "VAE must be conditional"
 
     print(f'loaded the model at epoch {checkpoint["epoch"]}')
     arch_instance = utils.get_arch_cells(args.arch_instance)
+
+    # resolve version difference
+    if eval_args.perturb_hand:
+        args.cond_robot_vec = False
+    args.zero_image = False
+
     model = AutoEncoder(args, None, arch_instance)
     # Loading is not strict because of self.weight_normalized in Conv2D class in neural_operations. This variable
     # is only used for computing the spectral normalization and it is safe not to load it. Some of our earlier models
@@ -79,7 +93,6 @@ def main(eval_args):
 
             info = None
             n = 1
-            assert args.cond_robot_state or args.cond_robot_type or args.cond_robot_mask, "VAE must be conditional"
 
             # we need to feed the encoder info in this case
             robot_state = data[1]
@@ -94,6 +107,8 @@ def main(eval_args):
                 info = robot_state.cuda()
             elif args.cond_robot_type:
                 info = robot_type.cuda()
+            if args.cond_hand:
+                info = (data[1].cuda(), data[2].cuda(), data[3].cuda())
 
             logits, log_q, log_p, kl_all, kl_diag = model(x, info)
             output = model.decoder_output(logits)
@@ -127,6 +142,9 @@ def main(eval_args):
                 perturbed_x = perturbed_x.cuda()
                 perturbed_mask = perturbed_x[:, 0] < MASK_THRESHOLD
                 info = perturbed_mask.float().unsqueeze(1).cuda()
+            elif eval_args.perturb_hand:
+                perturbed_data = next(iter(valid_queue))
+                info = (perturbed_data[1].cuda(), perturbed_data[2].cuda(), perturbed_data[3].cuda())
             else:
                 raise NotImplementedError
 
@@ -153,7 +171,7 @@ def main(eval_args):
                 plt.savefig(f'plots/{perturb_type}_perturb_check_2.png')
                 plt.show()
                 plt.close()
-            else:
+            elif eval_args.perturb_mask:
                 fig, axs = plt.subplots(3, 2, figsize=(10, 15))
                 fig.suptitle(f'{perturb_type} perturbation sanity check')
 
@@ -174,9 +192,35 @@ def main(eval_args):
                 axs[2, 1].set_title(f'Perturbed Output')
 
                 plt.tight_layout()
-                plt.savefig(f'plots/{perturb_type}_beta=4/perturb_check_{i_sample + 1}.png')
+                plt.savefig(f'plots/{perturb_type}_beta=30/perturb_check_{i_sample + 1}.png')
                 plt.show()
                 plt.close()
+            elif eval_args.perturb_hand:
+                fig, axs = plt.subplots(3, 2, figsize=(10, 15))
+                fig.suptitle(f'{perturb_type} perturbation sanity check')
+
+                # original
+                axs[0, 0].imshow(x_tiled.permute(1, 2, 0).cpu().data.numpy())
+                axs[0, 0].set_title(f'Original Input')
+                axs[1, 0].imshow(data[3].squeeze().float().permute(1, 2, 0).cpu().data.numpy())
+                axs[1, 0].set_title(f'Original Conditional Mask')
+                axs[2, 0].imshow(output_tiled.permute(1, 2, 0).cpu().data.numpy())
+                axs[2, 0].set_title(f'Original Output')
+
+                # perturb
+                axs[0, 1].imshow(x_tiled.permute(1, 2, 0).cpu().data.numpy())
+                axs[0, 1].set_title(f'Original Input')
+                axs[1, 1].imshow(perturbed_data[3].squeeze().float().permute(1, 2, 0).cpu().data.numpy())
+                axs[1, 1].set_title(f'Perturbed Conditional Mask')
+                axs[2, 1].imshow(perturbed_output_tiled.permute(1, 2, 0).cpu().data.numpy())
+                axs[2, 1].set_title(f'Perturbed Output')
+
+                plt.tight_layout()
+                plt.savefig(f'plots/{perturb_type}_beta={args.kl_beta}/perturb_check_{i_sample + 1}.png')
+                plt.show()
+                plt.close()
+            else:
+                raise NotImplementedError
 
 
 def init_processes(rank, size, fn, args, port='6020'):
@@ -211,6 +255,8 @@ if __name__ == '__main__':
                         help='If true, perturb robot type in the conditional input.')
     parser.add_argument('--perturb_mask', action='store_true', default=False,
                         help='If true, perturb robot mask in the conditional input.')
+    parser.add_argument('--perturb_hand', action='store_true', default=False,
+                        help='If true, perturb human hand in the conditional input.')
 
     parser.add_argument('--local_rank', type=int, default=0,
                         help='rank of process in the node')
@@ -220,6 +266,7 @@ if __name__ == '__main__':
                         help='address for master')
     parser.add_argument('--master_port', type=str, default='6020',
                         help='port for master')
+
     args = parser.parse_args()
     size = args.num_process_per_node
     init_processes(0, size, main, args, args.master_port)
