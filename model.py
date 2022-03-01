@@ -119,17 +119,18 @@ class AutoEncoder(nn.Module):
                                                  minimum_groups=args.min_groups_per_scale)
 
         self.vanilla_vae = self.num_latent_scales == 1 and self.num_groups_per_scale == 1
-        self.cond_robot_state = args.cond_robot_state
-        self.cond_robot_type = args.cond_robot_type
+        self.cond_robot_vec = args.cond_robot_vec
         self.cond_robot_mask = args.cond_robot_mask
+        self.cond_hand = args.cond_hand
         self.process_cond_info = args.process_cond_info
         self.cond_info_dim = 0
-        if self.cond_robot_type:
-            self.cond_info_dim += 4
-        if self.cond_robot_state:
-            self.cond_info_dim += 4
+        if self.cond_robot_vec:
+            self.cond_info_dim += 8
         if self.cond_robot_mask:
             self.cond_info_dim += 4
+        if self.cond_hand:
+            self.cond_info_dim += 76
+        self.zero_latent = args.zero_latent
 
         # encoder parameteres
         self.num_channels_enc = args.num_channels_enc
@@ -186,22 +187,49 @@ class AutoEncoder(nn.Module):
         self.image_conditional = self.init_image_conditional(mult)
 
         if self.process_cond_info:
-            if self.cond_robot_mask:
-                self.cond_process = nn.Sequential(
-                    nn.Conv2d(1, 32, 3, 1),
+            if self.cond_hand:
+                params_3d_process = nn.Sequential(
+                    nn.Linear(63, 128),
                     nn.ReLU(),
-                    nn.Conv2d(32, 32, 3, 1),
+                    nn.Linear(128, 128),
                     nn.ReLU(),
-                    nn.Conv2d(32, self.cond_info_dim, 3, 1)
-                )
-            else:
-                self.cond_process = nn.Sequential(
-                    nn.Linear(self.cond_info_dim, 32),
+                    nn.Linear(128, 64)
+                ).cuda()
+                hand_bb_process = nn.Sequential(
+                    nn.Linear(4, 32),
                     nn.ReLU(),
                     nn.Linear(32, 32),
                     nn.ReLU(),
-                    nn.Linear(32, self.cond_info_dim)
-                )
+                    nn.Linear(32, 4)
+                ).cuda()
+                mask_process = nn.Sequential(
+                    nn.Conv2d(3, 32, 3, 2, 1),
+                    nn.ReLU(),
+                    nn.Conv2d(32, 32, 3, 2, 1),
+                    nn.ReLU(),
+                    nn.Conv2d(32, 8, 3, 2, 1)
+                ).cuda()
+                self.cond_process = (params_3d_process, hand_bb_process, mask_process)
+            else:
+                vec_process = None
+                mask_process = None
+                if self.cond_robot_vec:
+                    vec_process = nn.Sequential(
+                        nn.Linear(8, 32),
+                        nn.ReLU(),
+                        nn.Linear(32, 32),
+                        nn.ReLU(),
+                        nn.Linear(32, 8)
+                    ).cuda()
+                if self.cond_robot_mask:
+                    mask_process = nn.Sequential(
+                        nn.Conv2d(1, 32, 3, 1),
+                        nn.ReLU(),
+                        nn.Conv2d(32, 32, 3, 1),
+                        nn.ReLU(),
+                        nn.Conv2d(32, 4, 3, 1)
+                    ).cuda()
+                self.cond_process = (vec_process, mask_process)
         else:
             self.cond_process = None
 
@@ -470,27 +498,81 @@ class AutoEncoder(nn.Module):
                 s = cell(s)
 
         if self.vanilla_vae:
+            if self.zero_latent:
+                z = torch.zeros_like(z).cuda()
+
             # concatenate extra info with sampled latent
             if cond_info is not None:
-                if self.cond_robot_mask:
-                    cond_info_processed = self.cond_process(cond_info)
-                    cond_info_processed = F.interpolate(cond_info_processed, z.size()[-2:])
-                    z = torch.cat((z, cond_info_processed), dim=1)
+                if self.cond_hand:
+                    params_3d, hand_bb, mask = cond_info
+                    params_3d_process, hand_bb_process, mask_process = self.cond_process
+
+                    params_3d_processed = params_3d_process(params_3d)
+                    params_3d_processed = torch.tile(params_3d_processed,
+                                                     (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
+
+                    hand_bb_processed = hand_bb_process(hand_bb)
+                    hand_bb_processed = torch.tile(hand_bb_processed,
+                                                   (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
+
+                    mask_processed = mask_process(mask)
+                    mask_processed = F.interpolate(mask_processed, z.size()[-2:])
+
+                    z = torch.cat((z, params_3d_processed, hand_bb_processed, mask_processed), dim=1)
                 else:
-                    cond_info_processed = self.cond_process(cond_info)
-                    cond_info_processed = torch.tile(cond_info_processed,
-                                                 (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
-                    z = torch.cat((z, cond_info_processed), dim=1)
+                    vec, mask = cond_info
+                    vec_process, mask_process = self.cond_process
+
+                    if self.cond_robot_mask:
+                        mask_info_processed = mask_process(mask)
+                        mask_info_processed = F.interpolate(mask_info_processed, z.size()[-2:])
+                        z = torch.cat((z, mask_info_processed), dim=1)
+                    if self.cond_robot_vec:
+                        vec_info_processed = vec_process(vec)
+                        vec_info_processed = torch.tile(vec_info_processed,
+                                                        (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
+                        z = torch.cat((z, vec_info_processed), dim=1)
             s = self.stem_decoder(z)
 
         if cond_info is not None:
-            if self.cond_robot_mask:
-                cond_info_processed = self.cond_process(cond_info)
-                cond_info_processed = F.interpolate(cond_info_processed, s.size()[-2:])
+            if self.cond_hand:
+                params_3d, hand_bb, mask = cond_info
+                params_3d_process, hand_bb_process, mask_process = self.cond_process
+
+                params_3d_processed = params_3d_process(params_3d)
+                params_3d_processed = torch.tile(params_3d_processed,
+                                                 (s.size(-2), s.size(-1), 1, 1)).permute((-2, -1, 0, 1))
+
+                hand_bb_processed = hand_bb_process(hand_bb)
+                hand_bb_processed = torch.tile(hand_bb_processed,
+                                               (s.size(-2), s.size(-1), 1, 1)).permute((-2, -1, 0, 1))
+
+                mask_processed = mask_process(mask)
+                mask_processed = F.interpolate(mask_processed, s.size()[-2:])
+
+                cond_info_processed = torch.cat((params_3d_processed, hand_bb_processed, mask_processed), dim=1)
             else:
-                cond_info_processed = self.cond_process(cond_info)
-                cond_info_processed = torch.tile(cond_info_processed,
-                                             (s.size(-2), s.size(-1), 1, 1)).permute((-2, -1, 0, 1))
+                vec, mask = cond_info
+                vec_process, mask_process = self.cond_process
+
+                cond_info_processed = None
+                if self.cond_robot_vec and self.cond_robot_mask:
+                    mask_info_processed = mask_process(mask)
+                    mask_info_processed = F.interpolate(mask_info_processed, z.size()[-2:])
+                    vec_info_processed = vec_process(vec)
+                    vec_info_processed = torch.tile(vec_info_processed,
+                                                    (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
+                    cond_info_processed = torch.cat((vec_info_processed, mask_info_processed), dim=1)
+                elif self.cond_robot_mask:
+                    cond_info_processed = mask_process(mask)
+                    cond_info_processed = F.interpolate(cond_info_processed, z.size()[-2:])
+                elif self.cond_robot_vec:
+                    cond_info_processed = vec_process(vec)
+                    cond_info_processed = torch.tile(cond_info_processed,
+                                                     (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
+
+        if self.zero_latent:
+            s = torch.zeros_like(s).cuda()
         for cell in self.post_process:
             if cell.cell_type == 'combiner_dec':
                 # 'combiner_dec', combines conditional info with decoder tower output
@@ -545,27 +627,80 @@ class AutoEncoder(nn.Module):
                     scale_ind += 1
 
         if self.vanilla_vae:
+            if self.zero_latent:
+                z = torch.zeros_like(z).cuda()
+
             # concatenate extra info with sampled latent
             if cond_info is not None:
-                if self.cond_robot_mask:
-                    cond_info_processed = self.cond_process(cond_info)
-                    cond_info_processed = F.interpolate(cond_info_processed, z.size()[-2:])
-                    z = torch.cat((z, cond_info_processed), dim=1)
+                if self.cond_hand:
+                    params_3d, hand_bb, mask = cond_info
+                    params_3d_process, hand_bb_process, mask_process = self.cond_process
+
+                    params_3d_processed = params_3d_process(params_3d)
+                    params_3d_processed = torch.tile(params_3d_processed,
+                                                     (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
+
+                    hand_bb_processed = hand_bb_process(hand_bb)
+                    hand_bb_processed = torch.tile(hand_bb_processed,
+                                                   (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
+
+                    mask_processed = mask_process(mask)
+                    mask_processed = F.interpolate(mask_processed, z.size()[-2:])
+
+                    z = torch.cat((z, params_3d_processed, hand_bb_processed, mask_processed), dim=1)
                 else:
-                    cond_info_processed = self.cond_process(cond_info)
-                    cond_info_processed = torch.tile(cond_info_processed,
-                                                 (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
-                    z = torch.cat((z, cond_info_processed), dim=1)
+                    vec, mask = cond_info
+                    vec_process, mask_process = self.cond_process
+
+                    if self.cond_robot_mask:
+                        mask_info_processed = mask_process(mask)
+                        mask_info_processed = F.interpolate(mask_info_processed, z.size()[-2:])
+                        z = torch.cat((z, mask_info_processed), dim=1)
+                    if self.cond_robot_vec:
+                        vec_info_processed = vec_process(vec)
+                        vec_info_processed = torch.tile(vec_info_processed,
+                                                        (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
+                        z = torch.cat((z, vec_info_processed), dim=1)
             s = self.stem_decoder(z)
 
         if cond_info is not None:
-            if self.cond_robot_mask:
-                cond_info_processed = self.cond_process(cond_info)
-                cond_info_processed = F.interpolate(cond_info_processed, s.size()[-2:])
+            if self.cond_hand:
+                params_3d, hand_bb, mask = cond_info
+                params_3d_process, hand_bb_process, mask_process = self.cond_process
+
+                params_3d_processed = params_3d_process(params_3d)
+                params_3d_processed = torch.tile(params_3d_processed,
+                                                 (s.size(-2), s.size(-1), 1, 1)).permute((-2, -1, 0, 1))
+
+                hand_bb_processed = hand_bb_process(hand_bb)
+                hand_bb_processed = torch.tile(hand_bb_processed,
+                                               (s.size(-2), s.size(-1), 1, 1)).permute((-2, -1, 0, 1))
+
+                mask_processed = mask_process(mask)
+                mask_processed = F.interpolate(mask_processed, s.size()[-2:])
+
+                cond_info_processed = torch.cat((params_3d_processed, hand_bb_processed, mask_processed), dim=1)
             else:
-                cond_info_processed = self.cond_process(cond_info)
-                cond_info_processed = torch.tile(cond_info_processed,
-                                             (s.size(-2), s.size(-1), 1, 1)).permute((-2, -1, 0, 1))
+                vec, mask = cond_info
+                vec_process, mask_process = self.cond_process
+
+                cond_info_processed = None
+                if self.cond_robot_vec and self.cond_robot_mask:
+                    mask_info_processed = mask_process(mask)
+                    mask_info_processed = F.interpolate(mask_info_processed, z.size()[-2:])
+                    vec_info_processed = vec_process(vec)
+                    vec_info_processed = torch.tile(vec_info_processed,
+                                                    (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
+                    cond_info_processed = torch.cat((vec_info_processed, mask_info_processed), dim=1)
+                elif self.cond_robot_mask:
+                    cond_info_processed = mask_process(mask)
+                    cond_info_processed = F.interpolate(cond_info_processed, z.size()[-2:])
+                elif self.cond_robot_vec:
+                    cond_info_processed = vec_process(vec)
+                    cond_info_processed = torch.tile(cond_info_processed,
+                                                     (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
+        if self.zero_latent:
+            s = torch.zeros_like(s).cuda()
         for cell in self.post_process:
             if cell.cell_type == 'combiner_dec':
                 # 'combiner_dec', combines conditional info with decoder tower output
