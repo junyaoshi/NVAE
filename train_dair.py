@@ -9,6 +9,7 @@
 # ---------------------------------------------------------------
 
 import argparse
+import time
 import torch
 import torch.nn as nn
 import numpy as np
@@ -33,9 +34,16 @@ MASK_THRESHOLD = 0.91
 def main(args):
     # flag logic check
     if args.process_cond_info:
-        assert args.cond_robot_type or args.cond_robot_state or args.cond_robot_mask
-    if args.cond_robot_mask:
-        assert not (args.cond_robot_type or args.cond_robot_state)
+        assert args.cond_robot_vec or args.cond_robot_mask or args.cond_hand
+    if args.cond_robot_vec or args.cond_robot_mask:
+        assert args.dataset == 'xmagical'
+        assert not args.cond_hand
+    if args.cond_hand:
+        assert args.dataset == 'something-something'
+        assert not (args.cond_robot_vec or args.cond_robot_mask)
+    if args.zero_latent:
+        args.kl_beta = 0.0
+        print('zero_latent flag is true, setting kl_beta to 0.')
 
     # ensures that weight initializations are all the same
     torch.manual_seed(args.seed)
@@ -133,8 +141,11 @@ def main(args):
                 num_samples = 16
                 n = int(np.floor(np.sqrt(num_samples)))
 
-                info = None
-                if args.cond_robot_state or args.cond_robot_type:
+                robot_vec_info = None
+                robot_mask_info = None
+                hand_info = None
+
+                if args.cond_robot_vec:
                     # we need to feed the encoder info in this case
                     # get num_samples sample from valid_queue
                     robot_state, robot_type = [], []
@@ -147,13 +158,7 @@ def main(args):
                             break
                     robot_state = torch.vstack(robot_state)[:num_samples]
                     robot_type = torch.vstack(robot_type)[:num_samples]
-
-                    if args.cond_robot_state and args.cond_robot_type:
-                        info = torch.cat((robot_state, robot_type), dim=1).cuda()
-                    elif args.cond_robot_state:
-                        info = robot_state.cuda()
-                    elif args.cond_robot_type:
-                        info = robot_type.cuda()
+                    robot_vec_info = torch.cat((robot_state, robot_type), dim=1).cuda()
 
                 if args.cond_robot_mask:
                     # we need to feed the encoder info in this case
@@ -163,16 +168,44 @@ def main(args):
                     for _, data in enumerate(valid_queue):
                         image = data[0]
                         image_mask = image[:, 0] < MASK_THRESHOLD
+
+                        # ignore grey pixels on the edge
+                        image_mask[0] = False
+                        image_mask[-1] = False
+                        image_mask[:, 0] = False
+                        image_mask[:, -1] = False
+
                         image_mask = image_mask.float().unsqueeze(1)
                         mask.append(image_mask)
                         samples_count += data[0].size(0)
                         if samples_count >= num_samples:
                             break
                     mask = torch.vstack(mask)[:num_samples]
-                    info = mask.cuda()
+                    robot_mask_info = mask.cuda()
+
+                if args.cond_hand:
+                    params_3d, hand_bb, mask = [], [], []
+                    samples_count = 0
+                    for _, data in enumerate(valid_queue):
+                        params_3d.append(data[1])
+                        hand_bb.append(data[2])
+                        mask.append(data[3])
+                        samples_count += data[0].size(0)
+                        if samples_count >= num_samples:
+                            break
+                    params_3d = torch.vstack(params_3d)[:num_samples]
+                    hand_bb = torch.vstack(hand_bb)[:num_samples]
+                    mask = torch.vstack(mask)[:num_samples]
+                    hand_info = (params_3d.cuda(), hand_bb.cuda(), mask.cuda())
+
+                cond_info = None
+                if args.cond_robot_vec or args.cond_robot_mask:
+                    cond_info = (robot_vec_info, robot_mask_info)
+                elif args.cond_hand:
+                    cond_info = hand_info
 
                 for t in [0.7, 0.8, 0.9, 1.0]:
-                    logits = model.sample(num_samples, t, info)
+                    logits = model.sample(num_samples, t, cond_info)
                     output = model.decoder_output(logits)
                     output_img = output.mean if isinstance(
                         output,
@@ -210,20 +243,36 @@ def train(train_queue, model, cnn_optimizer, grad_scalar, global_step, warmup_it
     nelbo = utils.AvgrageMeter()
     model.train()
     for step, data in tqdm(enumerate(train_queue), desc='Going through train data...'):
+        if args.print_time:
+            start = time.time()
         x = data[0] if len(data) > 1 else data
         x = x.cuda()
 
-        info = None
+        robot_vec_info = None
+        robot_mask_info = None
+        hand_info = None
+
+        if args.cond_robot_vec:
+            robot_vec_info = torch.cat((data[1], data[3]), dim=1).cuda()
         if args.cond_robot_mask:
             x_clone = torch.clone(x)
             mask = x_clone[:, 0] < MASK_THRESHOLD
-            info = mask.float().unsqueeze(1).cuda()
-        if args.cond_robot_state and args.cond_robot_type:
-            info = torch.cat((data[1], data[3]), dim=1).cuda()
-        elif args.cond_robot_state:
-            info = data[1].cuda()
-        elif args.cond_robot_type:
-            info = data[3].cuda()
+
+            # ignore grey pixels on the edge
+            mask[0] = False
+            mask[-1] = False
+            mask[:, 0] = False
+            mask[:, -1] = False
+
+            robot_mask_info = mask.float().unsqueeze(1).cuda()
+        if args.cond_hand:
+            hand_info = (data[1].cuda(), data[2].cuda(), data[3].cuda())
+
+        cond_info = None
+        if args.cond_robot_vec or args.cond_robot_mask:
+            cond_info = (robot_vec_info, robot_mask_info)
+        elif args.cond_hand:
+            cond_info = hand_info
 
         # change bit length
         x = utils.pre_process(x, args.num_x_bits)
@@ -240,7 +289,7 @@ def train(train_queue, model, cnn_optimizer, grad_scalar, global_step, warmup_it
 
         cnn_optimizer.zero_grad()
         with autocast():
-            logits, log_q, log_p, kl_all, kl_diag = model(x, info)
+            logits, log_q, log_p, kl_all, kl_diag = model(x, cond_info)
 
             output = model.decoder_output(logits)
             kl_coeff = utils.kl_coeff(global_step, args.kl_anneal_portion * args.num_total_iter,
@@ -311,6 +360,9 @@ def train(train_queue, model, cnn_optimizer, grad_scalar, global_step, warmup_it
             writer.add_scalar('kl/total_active', total_active, global_step)
 
         global_step += 1
+        if args.print_time:
+            end = time.time()
+            print(f'Time for this iteration: {end - start}')
 
     utils.average_tensor(nelbo.avg, args.distributed)
     return nelbo.avg, global_step
@@ -326,17 +378,31 @@ def test(valid_queue, model, num_samples, args, logging, global_step, writer):
         x = data[0] if len(data) > 1 else data
         x = x.cuda()
 
-        info = None
+        robot_vec_info = None
+        robot_mask_info = None
+        hand_info = None
+
+        if args.cond_robot_vec:
+            robot_vec_info = torch.cat((data[1], data[3]), dim=1).cuda()
         if args.cond_robot_mask:
             x_clone = torch.clone(x)
             mask = x_clone[:, 0] < MASK_THRESHOLD
-            info = mask.float().unsqueeze(1).cuda()
-        if args.cond_robot_state and args.cond_robot_type:
-            info = torch.cat((data[1], data[3]), dim=1).cuda()
-        elif args.cond_robot_state:
-            info = data[1].cuda()
-        elif args.cond_robot_type:
-            info = data[3].cuda()
+
+            # ignore grey pixels on the edge
+            mask[0] = False
+            mask[-1] = False
+            mask[:, 0] = False
+            mask[:, -1] = False
+
+            robot_mask_info = mask.float().unsqueeze(1).cuda()
+        if args.cond_hand:
+            hand_info = (data[1].cuda(), data[2].cuda(), data[3].cuda())
+
+        cond_info = None
+        if args.cond_robot_vec or args.cond_robot_mask:
+            cond_info = (robot_vec_info, robot_mask_info)
+        elif args.cond_hand:
+            cond_info = hand_info
 
         # change bit length
         x = utils.pre_process(x, args.num_x_bits)
@@ -344,7 +410,7 @@ def test(valid_queue, model, num_samples, args, logging, global_step, writer):
         with torch.no_grad():
             nelbo, log_iw = [], []
             for k in range(num_samples):
-                logits, log_q, log_p, kl_all, _ = model(x, info)
+                logits, log_q, log_p, kl_all, _ = model(x, cond_info)
                 output = model.decoder_output(logits)
                 recon_loss = utils.reconstruction_loss(output, x, crop=model.crop_output)
                 balanced_kl, _, _ = utils.kl_balancer(kl_all, kl_balance=False)
@@ -451,15 +517,19 @@ if __name__ == '__main__':
                         help='location of the data corpus')
     parser.add_argument('--num_workers', type=int, default=8,
                         help='number of workers for dataloaders')
-    parser.add_argument('--cond_robot_state', action='store_true', default=False,
-                        help='This flag enables using robot state as conditional input of the decoder')
-    parser.add_argument('--cond_robot_type', action='store_true', default=False,
-                        help='This flag enables using robot type as conditional input of the decoder')
+    parser.add_argument('--cond_robot_vec', action='store_true', default=False,
+                        help='This flag enables using robot state and type vector as conditional input of the decoder')
     parser.add_argument('--cond_robot_mask', action='store_true', default=False,
                         help='This flag enables using robot image mask as conditional input of the decoder')
+    parser.add_argument('--cond_hand', action='store_true', default=False,
+                        help='This flag enables using human hand information as conditional input of the decoder')
     parser.add_argument('--process_cond_info', action='store_true', default=False,
                         help='This flag creates a small MLP to process conditional input '
                              'before it is passed into the decoder')
+    parser.add_argument('--zero_latent', action='store_true', default=False,
+                        help='This flag sets the latent sample to the zero tensor for debugging')
+    parser.add_argument('--print_time', action='store_true', default=False,
+                        help='This flag makes the script prints out time per iteration for tuning batch size')
 
     # optimization
     parser.add_argument('--batch_size', type=int, default=200,
