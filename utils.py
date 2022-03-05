@@ -485,3 +485,7 @@ def groups_per_scale(num_scales, num_groups_per_scale, is_adaptive, divider=2, m
             n = n // divider
             n = max(minimum_groups, n)
     return g
+
+
+def vertical_red_line(height, width):
+    return torch.tensor((1.0, 0.0, 0.0)).view(3, 1, 1).repeat(1, height, width)

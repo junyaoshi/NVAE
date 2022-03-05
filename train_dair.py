@@ -11,7 +11,6 @@
 import argparse
 import time
 import torch
-import torch.nn as nn
 import numpy as np
 import os
 from tqdm import tqdm
@@ -432,7 +431,8 @@ def test(valid_queue, model, num_samples, args, logging, global_step, writer):
             output_img = output_img[:n * n]
             x_tiled = utils.tile_image(x_img, n)
             output_tiled = utils.tile_image(output_img, n)
-            in_out_tiled = torch.cat((x_tiled, output_tiled), dim=2)
+            red_line = utils.vertical_red_line(height=x_tiled.size(1), width=3).cuda()
+            in_out_tiled = torch.cat((x_tiled, red_line, output_tiled), dim=2)
             writer.add_image('valid/reconstruction', in_out_tiled, global_step)
 
     utils.average_tensor(nelbo_avg.avg, args.distributed)
