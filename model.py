@@ -127,9 +127,9 @@ class AutoEncoder(nn.Module):
         if self.cond_robot_vec:
             self.cond_info_dim += 8
         if self.cond_robot_mask:
-            self.cond_info_dim += 4
+            self.cond_info_dim += 32
         if self.cond_hand:
-            self.cond_info_dim += 76
+            self.cond_info_dim += (64 + 4 + 64)  # hand pose + bb + mask
         self.zero_latent = args.zero_latent
 
         # encoder parameteres
@@ -203,11 +203,13 @@ class AutoEncoder(nn.Module):
                     nn.Linear(32, 4)
                 ).cuda()
                 mask_process = nn.Sequential(
-                    nn.Conv2d(3, 32, 3, 2, 1),
+                    nn.Conv2d(3, 8, 3, 2, 1),
                     nn.ReLU(),
-                    nn.Conv2d(32, 32, 3, 2, 1),
+                    nn.Conv2d(8, 16, 3, 2, 1),
                     nn.ReLU(),
-                    nn.Conv2d(32, 8, 3, 2, 1)
+                    nn.Conv2d(16, 32, 3, 2, 1),
+                    nn.ReLU(),
+                    nn.Conv2d(32, 64, 3, 2, 1)
                 ).cuda()
                 self.cond_process = (params_3d_process, hand_bb_process, mask_process)
             else:
@@ -223,11 +225,13 @@ class AutoEncoder(nn.Module):
                     ).cuda()
                 if self.cond_robot_mask:
                     mask_process = nn.Sequential(
-                        nn.Conv2d(1, 32, 3, 1),
+                        nn.Conv2d(1, 4, 3, 2, 1),
                         nn.ReLU(),
-                        nn.Conv2d(32, 32, 3, 1),
+                        nn.Conv2d(4, 8, 3, 2, 1),
                         nn.ReLU(),
-                        nn.Conv2d(32, 4, 3, 1)
+                        nn.Conv2d(8, 16, 3, 2, 1),
+                        nn.ReLU(),
+                        nn.Conv2d(16, 32, 3, 2, 1)
                     ).cuda()
                 self.cond_process = (vec_process, mask_process)
         else:
