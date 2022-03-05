@@ -211,6 +211,16 @@ def main(args):
                         torch.distributions.bernoulli.Bernoulli
                     ) else output.sample(t)
                     output_tiled = utils.tile_image(output_img, n)
+                    if args.cond_hand:
+                        red_line = utils.vertical_red_line(height=output_tiled.size(1), width=3).cuda()
+                        mask_img = cond_info[2][:n * n]
+                        mask_tiled = utils.tile_image(mask_img, n)
+                        output_tiled = torch.cat((output_tiled, red_line, mask_tiled), dim=2)
+                    if args.cond_robot_mask:
+                        red_line = utils.vertical_red_line(height=output_tiled.size(1), width=3).cuda()
+                        mask_img = robot_mask_info[:n * n].repeat(1, 3, 1, 1)
+                        mask_tiled = utils.tile_image(mask_img, n)
+                        output_tiled = torch.cat((output_tiled, red_line, mask_tiled), dim=2)
                     writer.add_image('generated_%0.1f' % t, output_tiled, global_step)
 
         save_freq = 1 # int(np.ceil(args.epochs / 100))
@@ -328,7 +338,16 @@ def train(train_queue, model, cnn_optimizer, grad_scalar, global_step, warmup_it
                 output_img = output_img[:n * n]
                 x_tiled = utils.tile_image(x_img, n)
                 output_tiled = utils.tile_image(output_img, n)
-                in_out_tiled = torch.cat((x_tiled, output_tiled), dim=2)
+                red_line = utils.vertical_red_line(height=x_tiled.size(1), width=3).cuda()
+                in_out_tiled = torch.cat((x_tiled, red_line, output_tiled), dim=2)
+                if args.cond_hand:
+                    mask_img = cond_info[2][:n * n]
+                    mask_tiled = utils.tile_image(mask_img, n)
+                    in_out_tiled = torch.cat((in_out_tiled, red_line, mask_tiled), dim=2)
+                if args.cond_robot_mask:
+                    mask_img = robot_mask_info[:n * n].repeat(1, 3, 1, 1)
+                    mask_tiled = utils.tile_image(mask_img, n)
+                    in_out_tiled = torch.cat((in_out_tiled, red_line, mask_tiled), dim=2)
                 writer.add_image('train/reconstruction', in_out_tiled, global_step)
 
             # norm
@@ -433,6 +452,14 @@ def test(valid_queue, model, num_samples, args, logging, global_step, writer):
             output_tiled = utils.tile_image(output_img, n)
             red_line = utils.vertical_red_line(height=x_tiled.size(1), width=3).cuda()
             in_out_tiled = torch.cat((x_tiled, red_line, output_tiled), dim=2)
+            if args.cond_hand:
+                mask_img = cond_info[2][:n * n]
+                mask_tiled = utils.tile_image(mask_img, n)
+                in_out_tiled = torch.cat((in_out_tiled, red_line, mask_tiled), dim=2)
+            if args.cond_robot_mask:
+                mask_img = robot_mask_info[:n * n].repeat(1, 3, 1, 1)
+                mask_tiled = utils.tile_image(mask_img, n)
+                in_out_tiled = torch.cat((in_out_tiled, red_line, mask_tiled), dim=2)
             writer.add_image('valid/reconstruction', in_out_tiled, global_step)
 
     utils.average_tensor(nelbo_avg.avg, args.distributed)
