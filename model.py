@@ -211,7 +211,7 @@ class AutoEncoder(nn.Module):
                     nn.ReLU(),
                     nn.Conv2d(32, 64, 3, 2, 1)
                 ).cuda()
-                self.cond_process = (params_3d_process, hand_bb_process, mask_process)
+                self.cond_process = nn.ModuleList([params_3d_process, hand_bb_process, mask_process])
             else:
                 vec_process = None
                 mask_process = None
@@ -233,7 +233,7 @@ class AutoEncoder(nn.Module):
                         nn.ReLU(),
                         nn.Conv2d(16, 32, 3, 2, 1)
                     ).cuda()
-                self.cond_process = (vec_process, mask_process)
+                self.cond_process = nn.ModuleList([vec_process, mask_process])
         else:
             self.cond_process = None
 
