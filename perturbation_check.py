@@ -88,10 +88,10 @@ def generate_perturb_info(eval_args, data, valid_queue):
         perturbed_mask = perturbed_x[:, 0] < MASK_THRESHOLD
 
         # ignore grey pixels on the edge
-        perturbed_mask[0] = False
-        perturbed_mask[-1] = False
         perturbed_mask[:, 0] = False
         perturbed_mask[:, -1] = False
+        perturbed_mask[:, :, 0] = False
+        perturbed_mask[:, :, -1] = False
 
         perturbed_info = perturbed_mask.float().unsqueeze(1).cuda()
     elif eval_args.perturb_hand:
