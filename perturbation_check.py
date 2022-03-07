@@ -52,6 +52,137 @@ def flag_check(args, eval_args):
     return perturb_type
 
 
+def generate_cond_info(args, data, x):
+    cond_info = None
+    mask = None
+
+    if args.cond_robot_mask:
+        x_clone = torch.clone(x)
+        mask = x_clone[:, 0] < MASK_THRESHOLD
+
+        # ignore grey pixels on the edge
+        mask[0] = False
+        mask[-1] = False
+        mask[:, 0] = False
+        mask[:, -1] = False
+
+        cond_info = mask.float().unsqueeze(1).cuda()
+    elif args.cond_robot_vec:
+        cond_info = torch.cat((data[1], data[3]), dim=1).cuda()
+    elif args.cond_hand:
+        cond_info = (data[1].cuda(), data[2].cuda(), data[3].cuda())
+    return cond_info, mask
+
+
+def generate_perturb_info(eval_args, data, valid_queue):
+    perturbed_info = None
+    perturbed_robot_state, perturbed_robot_type = None, None
+    perturbed_data, perturbed_mask = None, None
+
+    if eval_args.perturb_vec:
+        perturbed_robot_pos = 2 * torch.rand(2) - 1
+        perturbed_robot_state = torch.clone(data[1])
+        perturbed_robot_state[0, :2] = perturbed_robot_pos
+        perturbed_robot_type = F.one_hot(
+            torch.randint(0, 4, (data[3].size(0),)),
+            num_classes=4
+        ).float().cuda()
+        perturbed_info = torch.cat((perturbed_robot_state, perturbed_robot_type), dim=1).cuda()
+    elif eval_args.perturb_mask:
+        perturbed_data = next(iter(valid_queue))
+        perturbed_x = perturbed_data[0] if len(perturbed_data) > 1 else perturbed_data
+        perturbed_x = perturbed_x.cuda()
+        perturbed_mask = perturbed_x[:, 0] < MASK_THRESHOLD
+
+        # ignore grey pixels on the edge
+        perturbed_mask[0] = False
+        perturbed_mask[-1] = False
+        perturbed_mask[:, 0] = False
+        perturbed_mask[:, -1] = False
+
+        perturbed_info = perturbed_mask.float().unsqueeze(1).cuda()
+    elif eval_args.perturb_hand:
+        perturbed_data = next(iter(valid_queue))
+        perturbed_info = (perturbed_data[1].cuda(), perturbed_data[2].cuda(), perturbed_data[3].cuda())
+
+    return perturbed_info, (perturbed_robot_state, perturbed_robot_type, perturbed_data, perturbed_mask)
+
+
+def plot_perturbation(eval_args, perturb_type, plot_dir, i_sample,
+                      x_tiled, output_tiled, perturbed_output_tiled,
+                      data, cond_info_details, perturbed_cond_info_details):
+    mask = cond_info_details
+    perturbed_robot_state, perturbed_robot_type, perturbed_data, perturbed_mask = perturbed_cond_info_details
+
+    if eval_args.perturb_vec:
+        fig, axs = plt.subplots(3, 1, figsize=(5, 15))
+        original_state = [round(v.item(), 4) for v in data[1][0, :2]]
+        original_type = TYPE_DICT[data[3].argmax().item()]
+        perturbed_state = [round(v.item(), 4) for v in perturbed_robot_state[0, :2]]
+        perturbed_type = TYPE_DICT[perturbed_robot_type.argmax().item()]
+        fig.suptitle(f'{perturb_type} perturbation sanity check')
+        axs[0].imshow(x_tiled.permute(1, 2, 0).cpu().data.numpy())
+        axs[0].set_title(f'Input | state: {original_state} | type: {original_type}')
+        axs[1].imshow(output_tiled.permute(1, 2, 0).cpu().data.numpy())
+        axs[1].set_title(f'Output | state: {original_state} | type: {original_type}')
+        axs[2].imshow(perturbed_output_tiled.permute(1, 2, 0).cpu().data.numpy())
+        axs[2].set_title(f'Perturbed Output | state: {perturbed_state} | type: {perturbed_type}')
+        plt.tight_layout()
+        plt.savefig(join(plot_dir, f'perturb_check_{i_sample + 1}.png'))
+        plt.show()
+        plt.close()
+    elif eval_args.perturb_mask:
+        fig, axs = plt.subplots(3, 2, figsize=(10, 15))
+        fig.suptitle(f'{perturb_type} perturbation sanity check')
+
+        # original
+        axs[0, 0].imshow(x_tiled.permute(1, 2, 0).cpu().data.numpy())
+        axs[0, 0].set_title(f'Original Input')
+        axs[1, 0].imshow(mask.float().permute(1, 2, 0).cpu().data.numpy())
+        axs[1, 0].set_title(f'Original Conditional Mask')
+        axs[2, 0].imshow(output_tiled.permute(1, 2, 0).cpu().data.numpy())
+        axs[2, 0].set_title(f'Original Output')
+
+        # perturb
+        axs[0, 1].imshow(x_tiled.permute(1, 2, 0).cpu().data.numpy())
+        axs[0, 1].set_title(f'Original Input')
+        axs[1, 1].imshow(perturbed_mask.float().permute(1, 2, 0).cpu().data.numpy())
+        axs[1, 1].set_title(f'Perturbed Conditional Mask')
+        axs[2, 1].imshow(perturbed_output_tiled.permute(1, 2, 0).cpu().data.numpy())
+        axs[2, 1].set_title(f'Perturbed Output')
+
+        plt.tight_layout()
+        plt.savefig(join(plot_dir, f'perturb_check_{i_sample + 1}.png'))
+        plt.show()
+        plt.close()
+    elif eval_args.perturb_hand:
+        fig, axs = plt.subplots(3, 2, figsize=(10, 15))
+        fig.suptitle(f'{perturb_type} perturbation sanity check')
+
+        # original
+        axs[0, 0].imshow(x_tiled.permute(1, 2, 0).cpu().data.numpy())
+        axs[0, 0].set_title(f'Original Input')
+        axs[1, 0].imshow(data[3].squeeze().float().permute(1, 2, 0).cpu().data.numpy())
+        axs[1, 0].set_title(f'Original Conditional Mask')
+        axs[2, 0].imshow(output_tiled.permute(1, 2, 0).cpu().data.numpy())
+        axs[2, 0].set_title(f'Original Output')
+
+        # perturb
+        axs[0, 1].imshow(x_tiled.permute(1, 2, 0).cpu().data.numpy())
+        axs[0, 1].set_title(f'Original Input')
+        axs[1, 1].imshow(perturbed_data[3].squeeze().float().permute(1, 2, 0).cpu().data.numpy())
+        axs[1, 1].set_title(f'Perturbed Conditional Mask')
+        axs[2, 1].imshow(perturbed_output_tiled.permute(1, 2, 0).cpu().data.numpy())
+        axs[2, 1].set_title(f'Perturbed Output')
+
+        plt.tight_layout()
+        plt.savefig(join(plot_dir, f'perturb_check_{i_sample + 1}.png'))
+        plt.show()
+        plt.close()
+    else:
+        raise NotImplementedError
+
+
 def main(eval_args):
     # load a checkpoint
     print('loading the model at:')
@@ -97,139 +228,31 @@ def main(eval_args):
         x = data[0] if len(data) > 1 else data
         x = x.cuda()
 
-        info = None
-        if args.cond_robot_mask:
-            x_clone = torch.clone(x)
-            mask = x_clone[:, 0] < MASK_THRESHOLD
-
-            # ignore grey pixels on the edge
-            mask[0] = False
-            mask[-1] = False
-            mask[:, 0] = False
-            mask[:, -1] = False
-
-            info = mask.float().unsqueeze(1).cuda()
-        elif args.cond_robot_vec:
-            info = torch.cat((data[1], data[3]), dim=1).cuda()
-        elif args.cond_hand:
-            info = (data[1].cuda(), data[2].cuda(), data[3].cuda())
+        cond_info, cond_info_details = generate_cond_info(args, data, x)
 
         # change bit length
         x = utils.pre_process(x, args.num_x_bits)
 
         with torch.no_grad():
-            logits, log_q, log_p, kl_all, kl_diag = model(x, info)
+            logits, log_q, log_p, kl_all, kl_diag = model(x, cond_info)
             output = model.decoder_output(logits)
             output_img = output.mean() if eval_args.output_mean else output.sample()
 
             n = 1
             x_tiled = utils.tile_image(x, n)
             output_tiled = utils.tile_image(output_img, n)
-            # x_tiled = x[0]
-            # output_tiled = output_img[0]
 
         # perturb image
-        if eval_args.perturb_vec:
-            perturbed_robot_pos = 2 * torch.rand(2) - 1
-            perturbed_robot_state = torch.clone(data[1])
-            perturbed_robot_state[0, :2] = perturbed_robot_pos
-            perturbed_robot_type = F.one_hot(
-                torch.randint(0, 4, (data[3].size(0),)),
-                num_classes=4
-            ).float().cuda()
-            perturbed_info = torch.cat((perturbed_robot_state, perturbed_robot_type), dim=1).cuda()
-        elif eval_args.perturb_mask:
-            perturbed_data = next(iter(valid_queue))
-            perturbed_x = perturbed_data[0] if len(perturbed_data) > 1 else perturbed_data
-            perturbed_x = perturbed_x.cuda()
-            perturbed_mask = perturbed_x[:, 0] < MASK_THRESHOLD
+        perturbed_cond_info, perturbed_cond_info_details = generate_perturb_info(eval_args, data, valid_queue)
 
-            # ignore grey pixels on the edge
-            perturbed_mask[0] = False
-            perturbed_mask[-1] = False
-            perturbed_mask[:, 0] = False
-            perturbed_mask[:, -1] = False
-
-            perturbed_info = perturbed_mask.float().unsqueeze(1).cuda()
-        elif eval_args.perturb_hand:
-            perturbed_data = next(iter(valid_queue))
-            perturbed_info = (perturbed_data[1].cuda(), perturbed_data[2].cuda(), perturbed_data[3].cuda())
-        else:
-            raise NotImplementedError
-
-        perturbed_logits, log_q, log_p, kl_all, kl_diag = model(x, perturbed_info)
+        perturbed_logits, log_q, log_p, kl_all, kl_diag = model(x, perturbed_cond_info)
         perturbed_output = model.decoder_output(perturbed_logits)
         perturbed_output_img = perturbed_output.mean() if eval_args.output_mean else perturbed_output.sample()
         perturbed_output_tiled = utils.tile_image(perturbed_output_img, n)
 
-        if eval_args.perturb_vec:
-            fig, axs = plt.subplots(3, 1, figsize=(5, 15))
-            original_state = [round(v.item(), 4) for v in data[1][0, :2]]
-            original_type = TYPE_DICT[data[3].argmax().item()]
-            perturbed_state = [round(v.item(), 4) for v in perturbed_robot_state[0, :2]]
-            perturbed_type = TYPE_DICT[perturbed_robot_type.argmax().item()]
-            fig.suptitle(f'{perturb_type} perturbation sanity check')
-            axs[0].imshow(x_tiled.permute(1, 2, 0).cpu().data.numpy())
-            axs[0].set_title(f'Input | state: {original_state} | type: {original_type}')
-            axs[1].imshow(output_tiled.permute(1, 2, 0).cpu().data.numpy())
-            axs[1].set_title(f'Output | state: {original_state} | type: {original_type}')
-            axs[2].imshow(perturbed_output_tiled.permute(1, 2, 0).cpu().data.numpy())
-            axs[2].set_title(f'Perturbed Output | state: {perturbed_state} | type: {perturbed_type}')
-            plt.tight_layout()
-            plt.savefig(join(plot_dir, f'perturb_check_{i_sample + 1}.png'))
-            plt.show()
-            plt.close()
-        elif eval_args.perturb_mask:
-            fig, axs = plt.subplots(3, 2, figsize=(10, 15))
-            fig.suptitle(f'{perturb_type} perturbation sanity check')
-
-            # original
-            axs[0, 0].imshow(x_tiled.permute(1, 2, 0).cpu().data.numpy())
-            axs[0, 0].set_title(f'Original Input')
-            axs[1, 0].imshow(mask.float().permute(1, 2, 0).cpu().data.numpy())
-            axs[1, 0].set_title(f'Original Conditional Mask')
-            # axs[2, 0].imshow(output_tiled.permute(1, 2, 0).cpu().data.numpy())
-            axs[2, 0].imshow(output_tiled.permute(1, 2, 0).cpu().data.numpy())
-            axs[2, 0].set_title(f'Original Output')
-
-            # perturb
-            axs[0, 1].imshow(x_tiled.permute(1, 2, 0).cpu().data.numpy())
-            axs[0, 1].set_title(f'Original Input')
-            axs[1, 1].imshow(perturbed_mask.float().permute(1, 2, 0).cpu().data.numpy())
-            axs[1, 1].set_title(f'Perturbed Conditional Mask')
-            axs[2, 1].imshow(perturbed_output_tiled.permute(1, 2, 0).cpu().data.numpy())
-            axs[2, 1].set_title(f'Perturbed Output')
-
-            plt.tight_layout()
-            plt.savefig(join(plot_dir, f'perturb_check_{i_sample + 1}.png'))
-            plt.show()
-            plt.close()
-        elif eval_args.perturb_hand:
-            fig, axs = plt.subplots(3, 2, figsize=(10, 15))
-            fig.suptitle(f'{perturb_type} perturbation sanity check')
-
-            # original
-            axs[0, 0].imshow(x_tiled.permute(1, 2, 0).cpu().data.numpy())
-            axs[0, 0].set_title(f'Original Input')
-            axs[1, 0].imshow(data[3].squeeze().float().permute(1, 2, 0).cpu().data.numpy())
-            axs[1, 0].set_title(f'Original Conditional Mask')
-            axs[2, 0].imshow(output_tiled.permute(1, 2, 0).cpu().data.numpy())
-            axs[2, 0].set_title(f'Original Output')
-
-            # perturb
-            axs[0, 1].imshow(x_tiled.permute(1, 2, 0).cpu().data.numpy())
-            axs[0, 1].set_title(f'Original Input')
-            axs[1, 1].imshow(perturbed_data[3].squeeze().float().permute(1, 2, 0).cpu().data.numpy())
-            axs[1, 1].set_title(f'Perturbed Conditional Mask')
-            axs[2, 1].imshow(perturbed_output_tiled.permute(1, 2, 0).cpu().data.numpy())
-            axs[2, 1].set_title(f'Perturbed Output')
-
-            plt.tight_layout()
-            plt.savefig(join(plot_dir, f'perturb_check_{i_sample + 1}.png'))
-            plt.show()
-            plt.close()
-        else:
-            raise NotImplementedError
+        plot_perturbation(eval_args, perturb_type, plot_dir, i_sample,
+                          x_tiled, output_tiled, perturbed_output_tiled,
+                          data, cond_info_details, perturbed_cond_info_details)
 
 
 def init_processes(rank, size, fn, args, port='6020'):

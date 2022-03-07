@@ -112,9 +112,9 @@ class AutoEncoder(nn.Module):
         self.res_dist = args.res_dist
         self.num_bits = args.num_x_bits
 
-        self.num_latent_scales = args.num_latent_scales         # number of spatial scales that latent layers will reside
-        self.num_groups_per_scale = args.num_groups_per_scale   # number of groups of latent vars. per scale
-        self.num_latent_per_group = args.num_latent_per_group   # number of latent vars. per group
+        self.num_latent_scales = args.num_latent_scales  # number of spatial scales that latent layers will reside
+        self.num_groups_per_scale = args.num_groups_per_scale  # number of groups of latent vars. per scale
+        self.num_latent_per_group = args.num_latent_per_group  # number of latent vars. per group
         self.groups_per_scale = groups_per_scale(self.num_latent_scales, self.num_groups_per_scale, args.ada_groups,
                                                  minimum_groups=args.min_groups_per_scale)
 
@@ -123,20 +123,14 @@ class AutoEncoder(nn.Module):
         self.cond_robot_mask = args.cond_robot_mask
         self.cond_hand = args.cond_hand
         self.process_cond_info = args.process_cond_info
-        self.cond_info_dim = 0
-        if self.cond_robot_vec:
-            self.cond_info_dim += 8
-        if self.cond_robot_mask:
-            self.cond_info_dim += 32
-        if self.cond_hand:
-            self.cond_info_dim += (64 + 4 + 64)  # hand pose + bb + mask
+        self.cond_info_dim = self.init_cond_info_dim()
         self.zero_latent = args.zero_latent
 
         # encoder parameteres
         self.num_channels_enc = args.num_channels_enc
         self.num_channels_dec = args.num_channels_dec
         self.num_preprocess_blocks = args.num_preprocess_blocks  # block is defined as series of Normal followed by Down
-        self.num_preprocess_cells = args.num_preprocess_cells   # number of cells per block
+        self.num_preprocess_cells = args.num_preprocess_cells  # number of cells per block
         self.num_cell_per_cond_enc = args.num_cell_per_cond_enc  # number of cell for each conditional in encoder
 
         # decoder parameters
@@ -157,7 +151,8 @@ class AutoEncoder(nn.Module):
         prior_ftr0_size = (int(c_scaling * self.num_channels_dec), self.input_size // spatial_scaling,
                            self.input_size // spatial_scaling)
         self.prior_ftr0 = nn.Parameter(torch.rand(size=prior_ftr0_size), requires_grad=True)
-        self.z0_size = [self.num_latent_per_group, self.input_size // spatial_scaling, self.input_size // spatial_scaling]
+        self.z0_size = [self.num_latent_per_group, self.input_size // spatial_scaling,
+                        self.input_size // spatial_scaling]
 
         self.stem = self.init_stem()
         self.pre_process, mult = self.init_pre_process(mult=1)
@@ -186,6 +181,40 @@ class AutoEncoder(nn.Module):
 
         self.image_conditional = self.init_image_conditional(mult)
 
+        self.cond_process = self.init_cond_proces()
+
+        # collect all norm params in Conv2D and gamma param in batchnorm
+        self.all_log_norm = []
+        self.all_conv_layers = []
+        self.all_bn_layers = []
+        for n, layer in self.named_modules():
+            # if isinstance(layer, Conv2D) and '_ops' in n:   # only chose those in cell
+            if isinstance(layer, Conv2D) or isinstance(layer, ARConv2d):
+                self.all_log_norm.append(layer.log_weight_norm)
+                self.all_conv_layers.append(layer)
+            if isinstance(layer, nn.BatchNorm2d) or isinstance(layer, nn.SyncBatchNorm) or \
+                    isinstance(layer, SyncBatchNormSwish):
+                self.all_bn_layers.append(layer)
+
+        print('len log norm:', len(self.all_log_norm))
+        print('len bn:', len(self.all_bn_layers))
+        # left/right singular vectors used for SR
+        self.sr_u = {}
+        self.sr_v = {}
+        self.num_power_iter = 4
+
+    def init_cond_info_dim(self):
+        cond_info_dim = 0
+        if self.cond_robot_vec:
+            cond_info_dim += 8
+        if self.cond_robot_mask:
+            cond_info_dim += 32
+        if self.cond_hand:
+            cond_info_dim += (64 + 4 + 64)  # hand pose + bb + mask
+        return cond_info_dim
+
+    def init_cond_proces(self):
+        cond_process = nn.ModuleList()
         if self.process_cond_info:
             if self.cond_hand:
                 params_3d_process = nn.Sequential(
@@ -211,10 +240,8 @@ class AutoEncoder(nn.Module):
                     nn.ReLU(),
                     nn.Conv2d(32, 64, 3, 2, 1)
                 ).cuda()
-                self.cond_process = nn.ModuleList([params_3d_process, hand_bb_process, mask_process])
+                cond_process = nn.ModuleList([params_3d_process, hand_bb_process, mask_process])
             else:
-                vec_process = None
-                mask_process = None
                 if self.cond_robot_vec:
                     vec_process = nn.Sequential(
                         nn.Linear(8, 32),
@@ -223,6 +250,7 @@ class AutoEncoder(nn.Module):
                         nn.ReLU(),
                         nn.Linear(32, 8)
                     ).cuda()
+                    cond_process.append(vec_process)
                 if self.cond_robot_mask:
                     mask_process = nn.Sequential(
                         nn.Conv2d(1, 4, 3, 2, 1),
@@ -233,29 +261,9 @@ class AutoEncoder(nn.Module):
                         nn.ReLU(),
                         nn.Conv2d(16, 32, 3, 2, 1)
                     ).cuda()
-                self.cond_process = nn.ModuleList([vec_process, mask_process])
-        else:
-            self.cond_process = None
+                    cond_process.append(mask_process)
 
-        # collect all norm params in Conv2D and gamma param in batchnorm
-        self.all_log_norm = []
-        self.all_conv_layers = []
-        self.all_bn_layers = []
-        for n, layer in self.named_modules():
-            # if isinstance(layer, Conv2D) and '_ops' in n:   # only chose those in cell
-            if isinstance(layer, Conv2D) or isinstance(layer, ARConv2d):
-                self.all_log_norm.append(layer.log_weight_norm)
-                self.all_conv_layers.append(layer)
-            if isinstance(layer, nn.BatchNorm2d) or isinstance(layer, nn.SyncBatchNorm) or \
-                    isinstance(layer, SyncBatchNormSwish):
-                self.all_bn_layers.append(layer)
-
-        print('len log norm:', len(self.all_log_norm))
-        print('len bn:', len(self.all_bn_layers))
-        # left/right singular vectors used for SR
-        self.sr_u = {}
-        self.sr_v = {}
-        self.num_power_iter = 4
+        return cond_process
 
     def init_stem(self):
         Cout = self.num_channels_enc
@@ -377,7 +385,7 @@ class AutoEncoder(nn.Module):
         if self.cond_info_dim > 0:
             num_c = int(self.num_channels_dec * mult)
             cell = DecCombinerCell(
-               self.cond_info_dim, num_c, num_c, cell_type='combiner_dec'
+                self.cond_info_dim, num_c, num_c, cell_type='combiner_dec'
             )
             post_process.append(cell)
         for b in range(self.num_postprocess_blocks):
@@ -409,6 +417,47 @@ class AutoEncoder(nn.Module):
         return nn.Sequential(nn.ELU(),
                              Conv2D(C_in, C_out, 3, padding=1, bias=True))
 
+    def cond_forward(self, latent, cond_info):
+        cond_info_processed = None
+        if cond_info is not None:
+            if self.cond_hand:
+                params_3d, hand_bb, mask = cond_info
+                params_3d_process, hand_bb_process, mask_process = self.cond_process
+
+                params_3d_processed = params_3d_process(params_3d)
+                params_3d_processed = torch.tile(params_3d_processed,
+                                                 (latent.size(-2), latent.size(-1), 1, 1)).permute((-2, -1, 0, 1))
+
+                hand_bb_processed = hand_bb_process(hand_bb)
+                hand_bb_processed = torch.tile(hand_bb_processed,
+                                               (latent.size(-2), latent.size(-1), 1, 1)).permute((-2, -1, 0, 1))
+
+                mask_processed = mask_process(mask)
+                mask_processed = F.interpolate(mask_processed, latent.size()[-2:])
+
+                cond_info_processed = torch.cat((params_3d_processed, hand_bb_processed, mask_processed), dim=1)
+            else:
+                vec, mask = cond_info
+                if self.cond_robot_vec and self.cond_robot_mask:
+                    vec_process, mask_process = self.cond_process
+                    mask_info_processed = mask_process(mask)
+                    mask_info_processed = F.interpolate(mask_info_processed, latent.size()[-2:])
+                    vec_info_processed = vec_process(vec)
+                    vec_info_processed = torch.tile(vec_info_processed,
+                                                    (latent.size(-2), latent.size(-1), 1, 1)).permute((-2, -1, 0, 1))
+                    cond_info_processed = torch.cat((vec_info_processed, mask_info_processed), dim=1)
+                elif self.cond_robot_mask:
+                    mask_process = self.cond_process[0]
+                    cond_info_processed = mask_process(mask)
+                    cond_info_processed = F.interpolate(cond_info_processed, latent.size()[-2:])
+                elif self.cond_robot_vec:
+                    vec_process = self.cond_process[0]
+                    cond_info_processed = vec_process(vec)
+                    cond_info_processed = torch.tile(cond_info_processed,
+                                                     (latent.size(-2), latent.size(-1), 1, 1)).permute((-2, -1, 0, 1))
+
+        return cond_info_processed
+
     def forward(self, x, cond_info=None):
         """
         Args:
@@ -438,10 +487,10 @@ class AutoEncoder(nn.Module):
         combiner_cells_s.reverse()
 
         idx_dec = 0
-        ftr = self.enc0(s)                            # this reduces the channel dimension
+        ftr = self.enc0(s)  # this reduces the channel dimension
         param0 = self.enc_sampler[idx_dec](ftr)
         mu_q, log_sig_q = torch.chunk(param0, 2, dim=1)
-        dist = Normal(mu_q, log_sig_q)   # for the first approx. posterior
+        dist = Normal(mu_q, log_sig_q)  # for the first approx. posterior
         z, _ = dist.sample()
         log_q_conv = dist.log_p(z)
 
@@ -501,82 +550,18 @@ class AutoEncoder(nn.Module):
             else:
                 s = cell(s)
 
+        cond_info_processed = self.cond_forward(z if self.vanilla_vae else s, cond_info)
+
         if self.vanilla_vae:
             if self.zero_latent:
                 z = torch.zeros_like(z).cuda()
-
-            # concatenate extra info with sampled latent
-            if cond_info is not None:
-                if self.cond_hand:
-                    params_3d, hand_bb, mask = cond_info
-                    params_3d_process, hand_bb_process, mask_process = self.cond_process
-
-                    params_3d_processed = params_3d_process(params_3d)
-                    params_3d_processed = torch.tile(params_3d_processed,
-                                                     (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
-
-                    hand_bb_processed = hand_bb_process(hand_bb)
-                    hand_bb_processed = torch.tile(hand_bb_processed,
-                                                   (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
-
-                    mask_processed = mask_process(mask)
-                    mask_processed = F.interpolate(mask_processed, z.size()[-2:])
-
-                    z = torch.cat((z, params_3d_processed, hand_bb_processed, mask_processed), dim=1)
-                else:
-                    vec, mask = cond_info
-                    vec_process, mask_process = self.cond_process
-
-                    if self.cond_robot_mask:
-                        mask_info_processed = mask_process(mask)
-                        mask_info_processed = F.interpolate(mask_info_processed, z.size()[-2:])
-                        z = torch.cat((z, mask_info_processed), dim=1)
-                    if self.cond_robot_vec:
-                        vec_info_processed = vec_process(vec)
-                        vec_info_processed = torch.tile(vec_info_processed,
-                                                        (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
-                        z = torch.cat((z, vec_info_processed), dim=1)
+            if cond_info_processed is not None:
+                z = torch.cat((z, cond_info_processed), dim=1)
             s = self.stem_decoder(z)
+        else:
+            if self.zero_latent:
+                s = torch.zeros_like(s).cuda()
 
-        if cond_info is not None:
-            if self.cond_hand:
-                params_3d, hand_bb, mask = cond_info
-                params_3d_process, hand_bb_process, mask_process = self.cond_process
-
-                params_3d_processed = params_3d_process(params_3d)
-                params_3d_processed = torch.tile(params_3d_processed,
-                                                 (s.size(-2), s.size(-1), 1, 1)).permute((-2, -1, 0, 1))
-
-                hand_bb_processed = hand_bb_process(hand_bb)
-                hand_bb_processed = torch.tile(hand_bb_processed,
-                                               (s.size(-2), s.size(-1), 1, 1)).permute((-2, -1, 0, 1))
-
-                mask_processed = mask_process(mask)
-                mask_processed = F.interpolate(mask_processed, s.size()[-2:])
-
-                cond_info_processed = torch.cat((params_3d_processed, hand_bb_processed, mask_processed), dim=1)
-            else:
-                vec, mask = cond_info
-                vec_process, mask_process = self.cond_process
-
-                cond_info_processed = None
-                if self.cond_robot_vec and self.cond_robot_mask:
-                    mask_info_processed = mask_process(mask)
-                    mask_info_processed = F.interpolate(mask_info_processed, z.size()[-2:])
-                    vec_info_processed = vec_process(vec)
-                    vec_info_processed = torch.tile(vec_info_processed,
-                                                    (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
-                    cond_info_processed = torch.cat((vec_info_processed, mask_info_processed), dim=1)
-                elif self.cond_robot_mask:
-                    cond_info_processed = mask_process(mask)
-                    cond_info_processed = F.interpolate(cond_info_processed, z.size()[-2:])
-                elif self.cond_robot_vec:
-                    cond_info_processed = vec_process(vec)
-                    cond_info_processed = torch.tile(cond_info_processed,
-                                                     (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
-
-        if self.zero_latent:
-            s = torch.zeros_like(s).cuda()
         for cell in self.post_process:
             if cell.cell_type == 'combiner_dec':
                 # 'combiner_dec', combines conditional info with decoder tower output
@@ -630,81 +615,18 @@ class AutoEncoder(nn.Module):
                 if cell.cell_type == 'up_dec':
                     scale_ind += 1
 
+        cond_info_processed = self.cond_forward(z if self.vanilla_vae else s, cond_info)
+
         if self.vanilla_vae:
             if self.zero_latent:
                 z = torch.zeros_like(z).cuda()
-
-            # concatenate extra info with sampled latent
-            if cond_info is not None:
-                if self.cond_hand:
-                    params_3d, hand_bb, mask = cond_info
-                    params_3d_process, hand_bb_process, mask_process = self.cond_process
-
-                    params_3d_processed = params_3d_process(params_3d)
-                    params_3d_processed = torch.tile(params_3d_processed,
-                                                     (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
-
-                    hand_bb_processed = hand_bb_process(hand_bb)
-                    hand_bb_processed = torch.tile(hand_bb_processed,
-                                                   (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
-
-                    mask_processed = mask_process(mask)
-                    mask_processed = F.interpolate(mask_processed, z.size()[-2:])
-
-                    z = torch.cat((z, params_3d_processed, hand_bb_processed, mask_processed), dim=1)
-                else:
-                    vec, mask = cond_info
-                    vec_process, mask_process = self.cond_process
-
-                    if self.cond_robot_mask:
-                        mask_info_processed = mask_process(mask)
-                        mask_info_processed = F.interpolate(mask_info_processed, z.size()[-2:])
-                        z = torch.cat((z, mask_info_processed), dim=1)
-                    if self.cond_robot_vec:
-                        vec_info_processed = vec_process(vec)
-                        vec_info_processed = torch.tile(vec_info_processed,
-                                                        (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
-                        z = torch.cat((z, vec_info_processed), dim=1)
+            if cond_info_processed is not None:
+                z = torch.cat((z, cond_info_processed), dim=1)
             s = self.stem_decoder(z)
+        else:
+            if self.zero_latent:
+                s = torch.zeros_like(s).cuda()
 
-        if cond_info is not None:
-            if self.cond_hand:
-                params_3d, hand_bb, mask = cond_info
-                params_3d_process, hand_bb_process, mask_process = self.cond_process
-
-                params_3d_processed = params_3d_process(params_3d)
-                params_3d_processed = torch.tile(params_3d_processed,
-                                                 (s.size(-2), s.size(-1), 1, 1)).permute((-2, -1, 0, 1))
-
-                hand_bb_processed = hand_bb_process(hand_bb)
-                hand_bb_processed = torch.tile(hand_bb_processed,
-                                               (s.size(-2), s.size(-1), 1, 1)).permute((-2, -1, 0, 1))
-
-                mask_processed = mask_process(mask)
-                mask_processed = F.interpolate(mask_processed, s.size()[-2:])
-
-                cond_info_processed = torch.cat((params_3d_processed, hand_bb_processed, mask_processed), dim=1)
-            else:
-                vec, mask = cond_info
-                vec_process, mask_process = self.cond_process
-
-                cond_info_processed = None
-                if self.cond_robot_vec and self.cond_robot_mask:
-                    mask_info_processed = mask_process(mask)
-                    mask_info_processed = F.interpolate(mask_info_processed, z.size()[-2:])
-                    vec_info_processed = vec_process(vec)
-                    vec_info_processed = torch.tile(vec_info_processed,
-                                                    (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
-                    cond_info_processed = torch.cat((vec_info_processed, mask_info_processed), dim=1)
-                elif self.cond_robot_mask:
-                    cond_info_processed = mask_process(mask)
-                    cond_info_processed = F.interpolate(cond_info_processed, z.size()[-2:])
-                elif self.cond_robot_vec:
-                    cond_info_processed = vec_process(vec)
-                    cond_info_processed = torch.tile(cond_info_processed,
-                                                     (z.size(-2), z.size(-1), 1, 1)).permute((-2, -1, 0, 1))
-        if self.zero_latent:
-            s = torch.zeros_like(s).cuda()
         for cell in self.post_process:
             if cell.cell_type == 'combiner_dec':
                 # 'combiner_dec', combines conditional info with decoder tower output
@@ -718,8 +640,10 @@ class AutoEncoder(nn.Module):
     def decoder_output(self, logits):
         if self.dataset in {'mnist', 'omniglot'}:
             return Bernoulli(logits=logits)
-        elif self.dataset in {'stacked_mnist', 'cifar10', 'celeba_64', 'celeba_256', 'imagenet_32', 'imagenet_64', 'ffhq',
-                              'lsun_bedroom_128', 'lsun_bedroom_256', 'lsun_church_64', 'lsun_church_128', 'xmagical', 'something-something'}:
+        elif self.dataset in {'stacked_mnist', 'cifar10', 'celeba_64', 'celeba_256', 'imagenet_32', 'imagenet_64',
+                              'ffhq',
+                              'lsun_bedroom_128', 'lsun_bedroom_256', 'lsun_church_64', 'lsun_church_128', 'xmagical',
+                              'something-something'}:
             if self.num_mix_output == 1:
                 return NormalDecoder(logits, num_bits=self.num_bits)
             else:
@@ -731,7 +655,7 @@ class AutoEncoder(nn.Module):
         """ This method computes spectral normalization for all conv layers in parallel. This method should be called
          after calling the forward method of all the conv layers in each iteration. """
 
-        weights = {}   # a dictionary indexed by the shape of weights
+        weights = {}  # a dictionary indexed by the shape of weights
         for l in self.all_conv_layers:
             weight = l.weight_normalized
             weight_mat = weight.view(weight.size(0), -1)
