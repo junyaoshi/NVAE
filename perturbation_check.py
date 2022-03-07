@@ -8,16 +8,9 @@ from matplotlib import pyplot as plt
 from tqdm import tqdm
 
 import utils
+from utils import MASK_THRESHOLD, TYPE_DICT
 from model import AutoEncoder
 import datasets
-
-MASK_THRESHOLD = 0.91
-TYPE_DICT = {
-    0: 'gripper',
-    1: 'longstick',
-    2: 'mediumstick',
-    3: 'shortstick'
-}
 
 
 def flag_check(args, eval_args):

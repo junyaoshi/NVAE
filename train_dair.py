@@ -22,12 +22,11 @@ from torch.cuda.amp import autocast, GradScaler
 from model import AutoEncoder
 from thirdparty.adamax import Adamax
 import utils
+from utils import MASK_THRESHOLD, TYPE_DICT
 import datasets
 
 from fid.fid_score import compute_statistics_of_generator, load_statistics, calculate_frechet_distance
 from fid.inception import InceptionV3
-
-MASK_THRESHOLD = 0.91
 
 
 def flag_check(args):
@@ -57,10 +56,10 @@ def generate_cond_info(args, data, x):
         mask = x_clone[:, 0] < MASK_THRESHOLD
 
         # ignore grey pixels on the edge
-        mask[0] = False
-        mask[-1] = False
         mask[:, 0] = False
         mask[:, -1] = False
+        mask[:, :, 0] = False
+        mask[:, :, -1] = False
 
         robot_mask_info = mask.float().unsqueeze(1).cuda()
     if args.cond_hand:
@@ -72,7 +71,7 @@ def generate_cond_info(args, data, x):
     elif args.cond_hand:
         cond_info = hand_info
 
-    return cond_info, (robot_vec_info, robot_mask_info, hand_info)
+    return cond_info
 
 
 def generate_cond_info_by_num(args, valid_queue, num_samples):
@@ -105,10 +104,10 @@ def generate_cond_info_by_num(args, valid_queue, num_samples):
             image_mask = image[:, 0] < MASK_THRESHOLD
 
             # ignore grey pixels on the edge
-            image_mask[0] = False
-            image_mask[-1] = False
             image_mask[:, 0] = False
             image_mask[:, -1] = False
+            image_mask[:, :, 0] = False
+            image_mask[:, :, -1] = False
 
             image_mask = image_mask.float().unsqueeze(1)
             mask.append(image_mask)
@@ -139,7 +138,100 @@ def generate_cond_info_by_num(args, valid_queue, num_samples):
     elif args.cond_hand:
         cond_info = hand_info
 
-    return cond_info, (robot_vec_info, robot_mask_info, hand_info)
+    return cond_info
+
+
+def log_model_output(args, x, cond_info, output, writer, global_step, tag):
+    n = int(np.floor(np.sqrt(x.size(0))))
+    x_img = x[:n * n]
+
+    output_img_mean = output.mean()
+    output_img_sample = output.sample()
+    output_img_mean = output_img_mean[:n * n]
+    output_img_sample = output_img_sample[:n * n]
+
+    x_tiled = utils.tile_image(x_img, n)
+    output_mean_tiled = utils.tile_image(output_img_mean, n)
+    output_sample_tiled = utils.tile_image(output_img_sample, n)
+
+    red_line = utils.vertical_red_line(height=x_tiled.size(1), width=3).cuda()
+    in_out_mean_tiled = torch.cat((x_tiled, red_line, output_mean_tiled), dim=2)
+    in_out_sample_tiled = torch.cat((x_tiled, red_line, output_sample_tiled), dim=2)
+
+    if args.cond_robot_vec:
+        robot_vec_info = cond_info[0][:n * n].cpu().numpy()
+        robot_state, robot_type = robot_vec_info[:, :4], robot_vec_info[:, 4:].argmax(axis=1).astype(np.uint8)
+        robot_state_text, robot_type_text = "", ""
+        for rs, rt in zip(robot_state, robot_type):
+            robot_state_text += f'{rs}  \n'
+            robot_type_text += f'{TYPE_DICT[rt]}  \n'
+        writer.add_text(f'{tag}/recon_robot_state', robot_state_text, global_step)
+        writer.add_text(f'{tag}/recon_robot_type', robot_type_text, global_step)
+    if args.cond_robot_mask:
+        mask_img = cond_info[1][:n * n].repeat(1, 3, 1, 1)
+        mask_tiled = utils.tile_image(mask_img, n)
+        in_out_mean_tiled = torch.cat((in_out_mean_tiled, red_line, mask_tiled), dim=2)
+        in_out_sample_tiled = torch.cat((in_out_sample_tiled, red_line, mask_tiled), dim=2)
+    if args.cond_hand:
+        mask_img = cond_info[2][:n * n]
+        mask_tiled = utils.tile_image(mask_img, n)
+        in_out_mean_tiled = torch.cat((in_out_mean_tiled, red_line, mask_tiled), dim=2)
+        in_out_sample_tiled = torch.cat((in_out_sample_tiled, red_line, mask_tiled), dim=2)
+
+    writer.add_image(f'{tag}_mean', in_out_mean_tiled, global_step)
+    writer.add_image(f'{tag}_sample', in_out_sample_tiled, global_step)
+
+
+def log_model_generation(args, model, valid_queue, writer, global_step):
+    num_samples = 16
+    n = int(np.floor(np.sqrt(num_samples)))
+
+    cond_info = generate_cond_info_by_num(args, valid_queue, num_samples)
+
+    for t in [0.7, 0.8, 0.9, 1.0]:
+        logits = model.sample(num_samples, t, cond_info)
+        output = model.decoder_output(logits)
+        output_img_mean = output.mean()
+        output_img_sample = output.sample(t)
+        output_mean_tiled = utils.tile_image(output_img_mean, n)
+        output_sample_tiled = utils.tile_image(output_img_sample, n)
+
+        red_line = utils.vertical_red_line(height=output_mean_tiled.size(1), width=3).cuda()
+        if args.cond_robot_vec:
+            robot_vec_info = cond_info[0][:n * n].cpu().numpy()
+            robot_state, robot_type = robot_vec_info[:, :4], robot_vec_info[:, 4:].argmax(axis=1).astype(np.uint8)
+            robot_state_text, robot_type_text = "", ""
+            for rs, rt in zip(robot_state, robot_type):
+                robot_state_text += f'{rs}  \n'
+                robot_type_text += f'{TYPE_DICT[rt]}  \n'
+            writer.add_text('generated_%0.1f/recon_robot_state' % t, robot_state_text, global_step)
+            writer.add_text('generated_%0.1f/recon_robot_type' % t, robot_type_text, global_step)
+        if args.cond_hand:
+            mask_img = cond_info[2][:n * n]
+            mask_tiled = utils.tile_image(mask_img, n)
+            output_mean_tiled = torch.cat((output_mean_tiled, red_line, mask_tiled), dim=2)
+            output_sample_tiled = torch.cat((output_sample_tiled, red_line, mask_tiled), dim=2)
+        if args.cond_robot_mask:
+            mask_img = cond_info[1][:n * n].repeat(1, 3, 1, 1)
+            mask_tiled = utils.tile_image(mask_img, n)
+            output_mean_tiled = torch.cat((output_mean_tiled, red_line, mask_tiled), dim=2)
+            output_sample_tiled = torch.cat((output_sample_tiled, red_line, mask_tiled), dim=2)
+
+        writer.add_image('generated_%0.1f/mean' % t, output_mean_tiled, global_step)
+        writer.add_image('generated_%0.1f/sample' % t, output_sample_tiled, global_step)
+
+
+def log_perturbation(args, model, x, queue, writer, global_step, tag):
+    perturbed_data = next(iter(queue))
+    perturbed_x = perturbed_data[0] if len(perturbed_data) > 1 else perturbed_data
+    perturbed_x = perturbed_x.cuda()
+
+    perturbed_cond_info = generate_cond_info(args, perturbed_data, perturbed_x)
+
+    with torch.no_grad():
+        logits, log_q, log_p, kl_all, kl_diag = model(x, perturbed_cond_info)
+        output = model.decoder_output(logits)
+    log_model_output(args, x, perturbed_cond_info, output, writer, global_step, tag)
 
 
 def main(args):
@@ -238,34 +330,7 @@ def main(args):
 
             # generate samples
             with torch.no_grad():
-                num_samples = 16
-                n = int(np.floor(np.sqrt(num_samples)))
-
-                cond_info, cond_info_details = generate_cond_info_by_num(args, valid_queue, num_samples)
-                robot_vec_info, robot_mask_info, hand_info = cond_info_details
-
-                for t in [0.7, 0.8, 0.9, 1.0]:
-                    logits = model.sample(num_samples, t, cond_info)
-                    output = model.decoder_output(logits)
-                    output_img_mean = output.mean()
-                    output_img_sample = output.sample(t)
-                    output_mean_tiled = utils.tile_image(output_img_mean, n)
-                    output_sample_tiled = utils.tile_image(output_img_sample, n)
-
-                    red_line = utils.vertical_red_line(height=output_mean_tiled.size(1), width=3).cuda()
-                    if args.cond_hand:
-                        mask_img = cond_info[2][:n * n]
-                        mask_tiled = utils.tile_image(mask_img, n)
-                        output_mean_tiled = torch.cat((output_mean_tiled, red_line, mask_tiled), dim=2)
-                        output_sample_tiled = torch.cat((output_sample_tiled, red_line, mask_tiled), dim=2)
-                    if args.cond_robot_mask:
-                        mask_img = robot_mask_info[:n * n].repeat(1, 3, 1, 1)
-                        mask_tiled = utils.tile_image(mask_img, n)
-                        output_mean_tiled = torch.cat((output_mean_tiled, red_line, mask_tiled), dim=2)
-                        output_sample_tiled = torch.cat((output_sample_tiled, red_line, mask_tiled), dim=2)
-
-                    writer.add_image('generated_%0.1f/mean' % t, output_mean_tiled, global_step)
-                    writer.add_image('generated_%0.1f/sample' % t, output_sample_tiled, global_step)
+                log_model_generation(args, model, valid_queue, writer, global_step)
 
         save_freq = 1 # int(np.ceil(args.epochs / 100))
         if epoch % save_freq == 0 or epoch == (args.epochs - 1):
@@ -301,8 +366,7 @@ def train(train_queue, model, cnn_optimizer, grad_scalar, global_step, warmup_it
         x = data[0] if len(data) > 1 else data
         x = x.cuda()
 
-        cond_info, cond_info_details = generate_cond_info(args, data, x)
-        robot_vec_info, robot_mask_info, hand_info = cond_info_details
+        cond_info = generate_cond_info(args, data, x)
 
         # change bit length
         x = utils.pre_process(x, args.num_x_bits)
@@ -352,33 +416,12 @@ def train(train_queue, model, cnn_optimizer, grad_scalar, global_step, warmup_it
 
         if (global_step + 1) % 100 == 0:
             if (global_step + 1) % 100 == 0:  # reduced frequency (originally % 1000)
-                n = int(np.floor(np.sqrt(x.size(0))))
-                x_img = x[:n * n]
-                output_img_mean = output.mean()
-                output_img_sample = output.sample()
-                output_img_mean = output_img_mean[:n * n]
-                output_img_sample = output_img_sample[:n * n]
-                x_tiled = utils.tile_image(x_img, n)
-                output_mean_tiled = utils.tile_image(output_img_mean, n)
-                output_sample_tiled = utils.tile_image(output_img_sample, n)
-
-                red_line = utils.vertical_red_line(height=x_tiled.size(1), width=3).cuda()
-                in_out_mean_tiled = torch.cat((x_tiled, red_line, output_mean_tiled), dim=2)
-                in_out_sample_tiled = torch.cat((x_tiled, red_line, output_sample_tiled), dim=2)
-
-                if args.cond_hand:
-                    mask_img = cond_info[2][:n * n]
-                    mask_tiled = utils.tile_image(mask_img, n)
-                    in_out_mean_tiled = torch.cat((in_out_mean_tiled, red_line, mask_tiled), dim=2)
-                    in_out_sample_tiled = torch.cat((in_out_sample_tiled, red_line, mask_tiled), dim=2)
-                if args.cond_robot_mask:
-                    mask_img = robot_mask_info[:n * n].repeat(1, 3, 1, 1)
-                    mask_tiled = utils.tile_image(mask_img, n)
-                    in_out_mean_tiled = torch.cat((in_out_mean_tiled, red_line, mask_tiled), dim=2)
-                    in_out_sample_tiled = torch.cat((in_out_sample_tiled, red_line, mask_tiled), dim=2)
-
-                writer.add_image('train/reconstruction_mean', in_out_mean_tiled, global_step)
-                writer.add_image('train/reconstruction_sample', in_out_sample_tiled, global_step)
+                log_model_output(args, x, cond_info, output, writer, global_step,
+                                 tag='train/reconstruction')
+                model.eval()
+                log_perturbation(args, model, x, train_queue, writer, global_step,
+                                 tag='train/perturbation')
+                model.train()
 
             # norm
             writer.add_scalar('train/norm_loss', norm_loss, global_step)
@@ -426,8 +469,7 @@ def test(valid_queue, model, num_samples, args, logging, global_step, writer):
         x = data[0] if len(data) > 1 else data
         x = x.cuda()
 
-        cond_info, cond_info_details = generate_cond_info(args, data, x)
-        robot_vec_info, robot_mask_info, hand_info = cond_info_details
+        cond_info = generate_cond_info(args, data, x)
 
         # change bit length
         x = utils.pre_process(x, args.num_x_bits)
@@ -450,33 +492,10 @@ def test(valid_queue, model, num_samples, args, logging, global_step, writer):
         neg_log_p_avg.update(- log_p.data, x.size(0))
 
         if step == 0:  # reduced frequency
-            n = int(np.floor(np.sqrt(x.size(0))))
-            x_img = x[:n * n]
-            output_img_mean = output.mean()
-            output_img_sample = output.sample()
-            output_img_mean = output_img_mean[:n * n]
-            output_img_sample = output_img_sample[:n * n]
-            x_tiled = utils.tile_image(x_img, n)
-            output_mean_tiled = utils.tile_image(output_img_mean, n)
-            output_sample_tiled = utils.tile_image(output_img_sample, n)
-
-            red_line = utils.vertical_red_line(height=x_tiled.size(1), width=3).cuda()
-            in_out_mean_tiled = torch.cat((x_tiled, red_line, output_mean_tiled), dim=2)
-            in_out_sample_tiled = torch.cat((x_tiled, red_line, output_sample_tiled), dim=2)
-
-            if args.cond_hand:
-                mask_img = cond_info[2][:n * n]
-                mask_tiled = utils.tile_image(mask_img, n)
-                in_out_mean_tiled = torch.cat((in_out_mean_tiled, red_line, mask_tiled), dim=2)
-                in_out_sample_tiled = torch.cat((in_out_sample_tiled, red_line, mask_tiled), dim=2)
-            if args.cond_robot_mask:
-                mask_img = robot_mask_info[:n * n].repeat(1, 3, 1, 1)
-                mask_tiled = utils.tile_image(mask_img, n)
-                in_out_mean_tiled = torch.cat((in_out_mean_tiled, red_line, mask_tiled), dim=2)
-                in_out_sample_tiled = torch.cat((in_out_sample_tiled, red_line, mask_tiled), dim=2)
-
-            writer.add_image('valid/reconstruction_mean', in_out_mean_tiled, global_step)
-            writer.add_image('valid/reconstruction_sample', in_out_sample_tiled, global_step)
+            log_model_output(args, x, cond_info, output, writer, global_step,
+                             tag='valid/reconstruction')
+            log_perturbation(args, model, x, valid_queue, writer, global_step,
+                             tag='valid/perturbation')
 
     utils.average_tensor(nelbo_avg.avg, args.distributed)
     utils.average_tensor(neg_log_p_avg.avg, args.distributed)

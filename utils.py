@@ -21,6 +21,15 @@ import torch.nn.functional as F
 from tensorboardX import SummaryWriter
 
 
+MASK_THRESHOLD = 0.91
+TYPE_DICT = {
+    0: 'gripper',
+    1: 'longstick',
+    2: 'mediumstick',
+    3: 'shortstick'
+}
+
+
 class AvgrageMeter(object):
 
     def __init__(self):
@@ -129,6 +138,10 @@ class Writer(object):
     def add_scalar(self, *args, **kwargs):
         if self.rank == 0:
             self.writer.add_scalar(*args, **kwargs)
+
+    def add_text(self, *args, **kwargs):
+        if self.rank == 0:
+            self.writer.add_text(*args, **kwargs)
 
     def add_figure(self, *args, **kwargs):
         if self.rank == 0:
