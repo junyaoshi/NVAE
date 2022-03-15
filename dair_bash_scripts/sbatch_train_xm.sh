@@ -6,19 +6,19 @@
 #SBATCH --time=48:00:00
 #SBATCH --gpus=rtx2080ti:1
 #SBATCH -w node-2080ti-5
-#SBATCH --job-name=xm-b1
-#SBATCH -o out/xm_mask_b1.out
+#SBATCH --job-name=xm-b10
+#SBATCH -o out/xm_mask_b10.out
 
 export PYTHONPATH="/home/junyao/LfHV/NVAE"
-export BETA=1
-export BETA_STR=1
-export SEED=25
-export BATCH_SIZE=16
-export MASTER_PORT=6025
+export BETA=10
+export BETA_STR=10
+export SEED=32
+export BATCH_SIZE=32
+export MASTER_PORT=6012
 export EPOCHS=300
 export NUM_WORKERS=4
 export TYPE="cond_mask"
-export TIME="03020930"
+export TIME="03071800"
 
 echo "PYTHONPATH: ${PYTHONPATH}"
 echo "BETA: ${BETA}"
@@ -39,10 +39,10 @@ python /home/junyao/LfHV/NVAE/train_dair.py \
 --epochs=${EPOCHS} \
 --weight_decay_norm=1e-1 \
 --num_nf=1 \
---num_latent_scales=1 --num_groups_per_scale=10 --num_latent_per_group=20 \
+--num_latent_scales=1 --num_groups_per_scale=8 --num_latent_per_group=20 \
 --num_channels_enc=64 --num_channels_dec=64 \
---num_preprocess_blocks=3 --num_preprocess_cells=2 \
---num_postprocess_blocks=3 --num_postprocess_cells=12 \
+--num_preprocess_blocks=2 --num_preprocess_cells=2 \
+--num_postprocess_blocks=2 --num_postprocess_cells=6 \
 --num_cell_per_cond_enc=1 --num_cell_per_cond_dec=1 \
 --num_process_per_node=1 \
 --use_se --res_dist --ada_groups \
