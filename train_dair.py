@@ -40,8 +40,7 @@ def flag_check(args):
         assert args.dataset == 'something-something'
         assert not (args.cond_robot_vec or args.cond_robot_mask)
     if args.zero_latent:
-        args.kl_beta = 0.0
-        print('zero_latent flag is true, setting kl_beta to 0.')
+        print('zero_latent mode.')
 
 
 def generate_cond_info(args, data, x):
@@ -340,7 +339,7 @@ def main(args):
                             'optimizer': cnn_optimizer.state_dict(), 'global_step': global_step,
                             'args': args, 'arch_instance': arch_instance, 'scheduler': cnn_scheduler.state_dict(),
                             'grad_scalar': grad_scalar.state_dict()},
-                           os.path.join(args.save, f'checkpoint_{epoch:03d}.pt'))
+                           os.path.join(args.save, f'checkpoint.pt'))
 
     # Final validation
     valid_neg_log_p, valid_nelbo = test(
