@@ -51,11 +51,11 @@ class SomethingSomething(Dataset):
             self.hand_paths = self.hand_paths[int(len(self.hand_paths) * 0.9):]
         if debug:
             if self.train:
-                self.image_paths = self.image_paths[0:50]
-                self.hand_paths = self.hand_paths[0:50]
+                self.image_paths = self.image_paths[0:100]
+                self.hand_paths = self.hand_paths[0:100]
             else:
-                self.image_paths = self.image_paths[50:75]
-                self.hand_paths = self.hand_paths[50:75]
+                self.image_paths = self.image_paths[100:200]
+                self.hand_paths = self.hand_paths[100:200]
 
         assert len(self.image_paths) == len(self.hand_paths)
 
