@@ -81,22 +81,22 @@ class SomethingSomething(Dataset):
         params_3d = hand['pred_joints_smpl'].reshape(63)
         # cropped_hand = np.array(img.crop((hand_bb[0],hand_bb[1],hand_bb[0]+hand_bb[2],hand_bb[1]+hand_bb[3])))
 
-        mask = np.zeros((np.array(img).shape), np.uint8)
-        mask[hand_bb[1]:hand_bb[1] + hand_bb[3], hand_bb[0]:hand_bb[0] + hand_bb[2]] = \
+        cropped_hand = np.zeros((np.array(img).shape), np.uint8)
+        cropped_hand[hand_bb[1]:hand_bb[1] + hand_bb[3], hand_bb[0]:hand_bb[0] + hand_bb[2]] = \
             np.array(img)[hand_bb[1]:hand_bb[1] + hand_bb[3], hand_bb[0]:hand_bb[0] + hand_bb[2]]
-        mask = Image.fromarray(mask)
+        cropped_hand = Image.fromarray(cropped_hand)
 
         if self.transform is not None:
             image = self.transform(img)
-            mask = self.transform(mask)
+            cropped_hand = self.transform(cropped_hand)
         hand_bb = np.array([hand_bb[0] / w, hand_bb[1] / h, hand_bb[2] / w, hand_bb[3] / h]).astype(np.float32)
 
         # Dataloader returns:
         #   1. image: Frame from something-something dataset of shape given by self.transform
         #   2. params_3d: 63 features produced by 3D Hand Reconstruction
         #   3. hand_bb: 4 numbers in the form [x,y,w,h] that indicate the position of the hand in the image.
-        #   4. mask: Image of the cropped hand according to hand_bb padded on the size of the image.
-        return image, params_3d, hand_bb, mask
+        #   4. cropped_hand: Image of the cropped hand according to hand_bb padded on the size of the image.
+        return image, params_3d, hand_bb, cropped_hand
 
 
 class XMagicalDataset(Dataset):
