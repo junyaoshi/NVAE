@@ -32,13 +32,16 @@ class Probe(nn.Module):
             )
         else:
             self.decoder = nn.Sequential(
-                nn.Conv2d(128, 32, (3, 3), (2, 2), 1),
+                nn.Conv2d(256, 256, (3, 3), (2, 2), 1),
                 nn.ReLU(),
-                nn.Conv2d(32, 8, (3, 3), (2, 2), 1),
+                nn.Conv2d(256, 256, (3, 3), (2, 2), 1),
+                nn.ReLU(),
+                nn.Conv2d(256, 256, (3, 3), (2, 2), 1),
                 nn.ReLU(),
                 nn.AvgPool2d(2, 2),
                 nn.Flatten(),
-                nn.Linear(128, self.output_dim)
+                nn.Linear(256, 32),
+                nn.Linear(32, self.output_dim)
             )
 
     def get_vae_latent(self, x):
