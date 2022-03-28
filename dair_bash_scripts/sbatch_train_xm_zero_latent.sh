@@ -3,22 +3,22 @@
 #SBATCH --partition=dineshj-compute
 #SBATCH --qos=dineshj-high
 #SBATCH --cpus-per-gpu=4
-#SBATCH --time=48:00:00
-#SBATCH --gpus=rtx2080ti:1
+#SBATCH --time=24:00:00
+#SBATCH --gpus=1
 #SBATCH -w node-2080ti-5
-#SBATCH --job-name=xm-0
-#SBATCH -o out/xm_mask_0.out
+#SBATCH --job-name=xm-0b0
+#SBATCH -o out/xm_vec_0b0.out
 
 export PYTHONPATH="/home/junyao/LfHV/NVAE"
 export BETA=0
 export BETA_STR=0
-export SEED=33
+export SEED=70
 export BATCH_SIZE=32
-export MASTER_PORT=6013
+export MASTER_PORT=6010
 export EPOCHS=300
 export NUM_WORKERS=4
-export TYPE="cond_mask/zero_latent"
-export TIME="03071800"
+export TYPE="cond_vec/zero_latent"
+export TIME="03172300"
 
 echo "PYTHONPATH: ${PYTHONPATH}"
 echo "BETA: ${BETA}"
@@ -34,7 +34,7 @@ echo "TIME: ${TIME}"
 python /home/junyao/LfHV/NVAE/train_dair.py \
 --root=/scratch/junyao/LfHV/NVAE/xm_checkpoints/${TYPE} \
 --dataset=xmagical \
---data=/scratch/junyao/Datasets/xmagical \
+--data=/Datasets/xmagical \
 --batch_size=${BATCH_SIZE} \
 --epochs=${EPOCHS} \
 --weight_decay_norm=1e-1 \
@@ -52,7 +52,7 @@ python /home/junyao/LfHV/NVAE/train_dair.py \
 --seed=${SEED} \
 --kl_beta=${BETA} \
 --num_workers=${NUM_WORKERS} \
---cond_robot_mask --process_cond_info \
+--cond_robot_vec --process_cond_info \
 --zero_latent \
 
 wait
