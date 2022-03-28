@@ -30,26 +30,28 @@ from fid.inception import InceptionV3
 
 
 def flag_check(args):
+    args.cond_robot, args.cond_hand = False, False
     # flag logic check
-    if args.process_cond_info:
-        assert args.cond_robot_vec or args.cond_robot_mask or args.cond_hand
     if args.cond_robot_vec or args.cond_robot_mask:
         assert args.dataset == 'xmagical'
-        assert not args.cond_hand
-    if args.cond_hand:
+        assert not (args.cond_params_3d or args.cond_hand_bb or args.cond_cropped_hand)
+        args.cond_robot = True
+    if args.cond_params_3d or args.cond_hand_bb or args.cond_cropped_hand:
         assert args.dataset == 'something-something'
         assert not (args.cond_robot_vec or args.cond_robot_mask)
+        args.cond_hand = True
+    if args.process_cond_info:
+        assert args.cond_robot or args.cond_hand
     if args.zero_latent:
         print('zero_latent mode.')
 
 
 def generate_cond_info(args, data, x):
-    robot_vec_info = None
-    robot_mask_info = None
-    hand_info = None
+    robot_vec, robot_mask = None, None
+    params_3d, hand_bb, cropped_hand = None, None, None
 
     if args.cond_robot_vec:
-        robot_vec_info = torch.cat((data[1], data[3]), dim=1).cuda()
+        robot_vec = torch.cat((data[1], data[3]), dim=1).cuda()
     if args.cond_robot_mask:
         x_clone = torch.clone(x)
         mask = x_clone[:, 0] < MASK_THRESHOLD
@@ -60,23 +62,26 @@ def generate_cond_info(args, data, x):
         mask[:, :, 0] = False
         mask[:, :, -1] = False
 
-        robot_mask_info = mask.float().unsqueeze(1).cuda()
-    if args.cond_hand:
-        hand_info = (data[1].cuda(), data[2].cuda(), data[3].cuda())
+        robot_mask = mask.float().unsqueeze(1).cuda()
+    if args.cond_params_3d:
+        params_3d = data[1].cuda()
+    if args.cond_hand_bb:
+        hand_bb = data[2].cuda()
+    if args.cond_cropped_hand:
+        cropped_hand = data[3].cuda()
 
     cond_info = None
-    if args.cond_robot_vec or args.cond_robot_mask:
-        cond_info = (robot_vec_info, robot_mask_info)
+    if args.cond_robot:
+        cond_info = robot_vec, robot_mask
     elif args.cond_hand:
-        cond_info = hand_info
+        cond_info = params_3d, hand_bb, cropped_hand
 
     return cond_info
 
 
 def generate_cond_info_by_num(args, valid_queue, num_samples):
-    robot_vec_info = None
-    robot_mask_info = None
-    hand_info = None
+    robot_vec, robot_mask = None, None
+    params_3d, hand_bb, cropped_hand = None, None, None
 
     if args.cond_robot_vec:
         # we need to feed the encoder info in this case
@@ -91,7 +96,7 @@ def generate_cond_info_by_num(args, valid_queue, num_samples):
                 break
         robot_state = torch.vstack(robot_state)[:num_samples]
         robot_type = torch.vstack(robot_type)[:num_samples]
-        robot_vec_info = torch.cat((robot_state, robot_type), dim=1).cuda()
+        robot_vec = torch.cat((robot_state, robot_type), dim=1).cuda()
 
     if args.cond_robot_mask:
         # we need to feed the encoder info in this case
@@ -114,28 +119,31 @@ def generate_cond_info_by_num(args, valid_queue, num_samples):
             if samples_count >= num_samples:
                 break
         mask = torch.vstack(mask)[:num_samples]
-        robot_mask_info = mask.cuda()
+        robot_mask = mask.cuda()
 
     if args.cond_hand:
-        params_3d, hand_bb, mask = [], [], []
+        params_3d_list, hand_bb_list, cropped_hand_list = [], [], []
         samples_count = 0
         for _, data in enumerate(valid_queue):
-            params_3d.append(data[1])
-            hand_bb.append(data[2])
-            mask.append(data[3])
+            params_3d_list.append(data[1])
+            hand_bb_list.append(data[2])
+            cropped_hand_list.append(data[3])
             samples_count += data[0].size(0)
             if samples_count >= num_samples:
                 break
-        params_3d = torch.vstack(params_3d)[:num_samples]
-        hand_bb = torch.vstack(hand_bb)[:num_samples]
-        mask = torch.vstack(mask)[:num_samples]
-        hand_info = (params_3d.cuda(), hand_bb.cuda(), mask.cuda())
+
+        if args.cond_params_3d:
+            params_3d = torch.vstack(params_3d_list)[:num_samples].cuda()
+        if args.cond_hand_bb:
+            hand_bb = torch.vstack(hand_bb_list)[:num_samples].cuda()
+        if args.cond_cropped_hand:
+            cropped_hand = torch.vstack(cropped_hand_list)[:num_samples].cuda()
 
     cond_info = None
-    if args.cond_robot_vec or args.cond_robot_mask:
-        cond_info = (robot_vec_info, robot_mask_info)
+    if args.cond_robot:
+        cond_info = robot_vec, robot_mask
     elif args.cond_hand:
-        cond_info = hand_info
+        cond_info = params_3d, hand_bb, cropped_hand
 
     return cond_info
 
@@ -158,24 +166,30 @@ def log_model_output(args, x, cond_info, output, writer, global_step, tag):
     in_out_sample_tiled = torch.cat((x_tiled, red_line, output_sample_tiled), dim=2)
 
     if args.cond_robot_vec:
-        robot_vec_info = cond_info[0][:n * n].cpu().numpy()
-        robot_state, robot_type = robot_vec_info[:, :4], robot_vec_info[:, 4:].argmax(axis=1).astype(np.uint8)
+        robot_vec = cond_info[0][:n * n].cpu().numpy()
+        robot_state, robot_type = robot_vec[:, :4], robot_vec[:, 4:].argmax(axis=1).astype(np.uint8)
         robot_state_text, robot_type_text = "", ""
-        for rs, rt in zip(robot_state, robot_type):
-            robot_state_text += f'{rs}  \n'
-            robot_type_text += f'{TYPE_DICT[rt]}  \n'
-        writer.add_text(f'{tag}/recon_robot_state', robot_state_text, global_step)
-        writer.add_text(f'{tag}/recon_robot_type', robot_type_text, global_step)
+        for n, (rs, rt) in enumerate(zip(robot_state, robot_type)):
+            robot_state_text += f'sample {n+1}: robot pos is {rs[:2]} | robot ori is {rs[2:]}  \n'
+            robot_type_text += f'sample {n+1}: {TYPE_DICT[rt]}  \n'
+        writer.add_text(f'{tag}/robot_state', robot_state_text, global_step)
+        writer.add_text(f'{tag}/robot_type', robot_type_text, global_step)
     if args.cond_robot_mask:
         mask_img = cond_info[1][:n * n].repeat(1, 3, 1, 1)
         mask_tiled = utils.tile_image(mask_img, n)
         in_out_mean_tiled = torch.cat((in_out_mean_tiled, red_line, mask_tiled), dim=2)
         in_out_sample_tiled = torch.cat((in_out_sample_tiled, red_line, mask_tiled), dim=2)
-    if args.cond_hand:
-        mask_img = cond_info[2][:n * n]
-        mask_tiled = utils.tile_image(mask_img, n)
-        in_out_mean_tiled = torch.cat((in_out_mean_tiled, red_line, mask_tiled), dim=2)
-        in_out_sample_tiled = torch.cat((in_out_sample_tiled, red_line, mask_tiled), dim=2)
+    if args.cond_hand_bb:
+        hand_bb = cond_info[1][:n * n].cpu().numpy()
+        hand_bb_text = ""
+        for i, xwyh in enumerate(hand_bb):
+            hand_bb_text += f'sample {i + 1}: xwyh is {xwyh}  \n'
+        writer.add_text(f'{tag}/hand_bb', hand_bb_text, global_step)
+    if args.cond_cropped_hand:
+        cropped_hand_img = cond_info[2][:n * n]
+        cropped_hand_tiled = utils.tile_image(cropped_hand_img, n)
+        in_out_mean_tiled = torch.cat((in_out_mean_tiled, red_line, cropped_hand_tiled), dim=2)
+        in_out_sample_tiled = torch.cat((in_out_sample_tiled, red_line, cropped_hand_tiled), dim=2)
 
     writer.add_image(f'{tag}_mean', in_out_mean_tiled, global_step)
     writer.add_image(f'{tag}_sample', in_out_sample_tiled, global_step)
@@ -197,24 +211,30 @@ def log_model_generation(args, model, valid_queue, writer, global_step):
 
         red_line = utils.vertical_red_line(height=output_mean_tiled.size(1), width=3).cuda()
         if args.cond_robot_vec:
-            robot_vec_info = cond_info[0][:n * n].cpu().numpy()
-            robot_state, robot_type = robot_vec_info[:, :4], robot_vec_info[:, 4:].argmax(axis=1).astype(np.uint8)
+            robot_vec = cond_info[0][:n * n].cpu().numpy()
+            robot_state, robot_type = robot_vec[:, :4], robot_vec[:, 4:].argmax(axis=1).astype(np.uint8)
             robot_state_text, robot_type_text = "", ""
-            for rs, rt in zip(robot_state, robot_type):
-                robot_state_text += f'{rs}  \n'
-                robot_type_text += f'{TYPE_DICT[rt]}  \n'
-            writer.add_text('generated_%0.1f/recon_robot_state' % t, robot_state_text, global_step)
-            writer.add_text('generated_%0.1f/recon_robot_type' % t, robot_type_text, global_step)
-        if args.cond_hand:
-            mask_img = cond_info[2][:n * n]
-            mask_tiled = utils.tile_image(mask_img, n)
-            output_mean_tiled = torch.cat((output_mean_tiled, red_line, mask_tiled), dim=2)
-            output_sample_tiled = torch.cat((output_sample_tiled, red_line, mask_tiled), dim=2)
+            for i, (rs, rt) in enumerate(zip(robot_state, robot_type)):
+                robot_state_text += f'sample {i + 1}: robot pos is {rs[:2]} | robot ori is {rs[2:]}  \n'
+                robot_type_text += f'sample {i + 1}: {TYPE_DICT[rt]}  \n'
+            writer.add_text('generated_%0.1f/robot_state' % t, robot_state_text, global_step)
+            writer.add_text('generated_%0.1f/robot_type' % t, robot_type_text, global_step)
         if args.cond_robot_mask:
             mask_img = cond_info[1][:n * n].repeat(1, 3, 1, 1)
             mask_tiled = utils.tile_image(mask_img, n)
             output_mean_tiled = torch.cat((output_mean_tiled, red_line, mask_tiled), dim=2)
             output_sample_tiled = torch.cat((output_sample_tiled, red_line, mask_tiled), dim=2)
+        if args.cond_hand_bb:
+            hand_bb = cond_info[1][:n * n].cpu().numpy()
+            hand_bb_text = ""
+            for i, xwyh in enumerate(hand_bb):
+                hand_bb_text += f'sample {i + 1}: xwyh is {xwyh}  \n'
+            writer.add_text(f'generated_%0.1f/hand_bb' % t, hand_bb_text, global_step)
+        if args.cond_cropped_hand:
+            cropped_hand_img = cond_info[2][:n * n]
+            cropped_hand_tiled = utils.tile_image(cropped_hand_img, n)
+            output_mean_tiled = torch.cat((output_mean_tiled, red_line, cropped_hand_tiled), dim=2)
+            output_sample_tiled = torch.cat((output_sample_tiled, red_line, cropped_hand_tiled), dim=2)
 
         writer.add_image('generated_%0.1f/mean' % t, output_mean_tiled, global_step)
         writer.add_image('generated_%0.1f/sample' % t, output_sample_tiled, global_step)
@@ -578,19 +598,28 @@ if __name__ == '__main__':
                         help='location of the data corpus')
     parser.add_argument('--num_workers', type=int, default=8,
                         help='number of workers for dataloaders')
-    parser.add_argument('--cond_robot_vec', action='store_true', default=False,
-                        help='This flag enables using robot state and type vector as conditional input of the decoder')
-    parser.add_argument('--cond_robot_mask', action='store_true', default=False,
-                        help='This flag enables using robot image mask as conditional input of the decoder')
-    parser.add_argument('--cond_hand', action='store_true', default=False,
-                        help='This flag enables using human hand information as conditional input of the decoder')
-    parser.add_argument('--process_cond_info', action='store_true', default=False,
-                        help='This flag creates a small MLP to process conditional input '
-                             'before it is passed into the decoder')
     parser.add_argument('--zero_latent', action='store_true', default=False,
                         help='This flag sets the latent sample to the zero tensor for debugging')
     parser.add_argument('--print_time', action='store_true', default=False,
                         help='This flag makes the script prints out time per iteration for tuning batch size')
+
+    parser.add_argument('--cond_robot_vec', action='store_true', default=False,
+                        help='This flag enables using robot state and type vector as conditional input of the decoder')
+    parser.add_argument('--cond_robot_mask', action='store_true', default=False,
+                        help='This flag enables using robot image mask as conditional input of the decoder')
+    parser.add_argument('--cond_params_3d', action='store_true', default=False,
+                        help='This flag enables using 3D hand pose '
+                             'as conditional input of the decoder')
+    parser.add_argument('--cond_hand_bb', action='store_true', default=False,
+                        help='This flag enables using human hand bounding box information '
+                             'as conditional input of the decoder')
+    parser.add_argument('--cond_cropped_hand', action='store_true', default=False,
+                        help='This flag enables using image of cropped hand '
+                             'as conditional input of the decoder')
+    parser.add_argument('--process_cond_info', action='store_true', default=False,
+                        help='This flag creates a small MLP to process conditional input '
+                             'before it is passed into the decoder')
+
 
     # optimization
     parser.add_argument('--batch_size', type=int, default=200,

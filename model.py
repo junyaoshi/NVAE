@@ -119,9 +119,15 @@ class AutoEncoder(nn.Module):
                                                  minimum_groups=args.min_groups_per_scale)
 
         self.vanilla_vae = self.num_latent_scales == 1 and self.num_groups_per_scale == 1
+
+        # conditional info parameters
+        self.cond_hand = args.cond_hand
+        self.cond_robot = args.cond_robot
         self.cond_robot_vec = args.cond_robot_vec
         self.cond_robot_mask = args.cond_robot_mask
-        self.cond_hand = args.cond_hand
+        self.cond_params_3d = args.cond_params_3d
+        self.cond_hand_bb = args.cond_hand_bb
+        self.cond_cropped_hand = args.cond_cropped_hand
         self.process_cond_info = args.process_cond_info
         self.cond_info_dim = self.init_cond_info_dim()
         self.zero_latent = args.zero_latent
@@ -181,7 +187,7 @@ class AutoEncoder(nn.Module):
 
         self.image_conditional = self.init_image_conditional(mult)
 
-        self.cond_process = self.init_cond_proces()
+        self.init_cond_proces()
 
         # collect all norm params in Conv2D and gamma param in batchnorm
         self.all_log_norm = []
@@ -209,29 +215,55 @@ class AutoEncoder(nn.Module):
             cond_info_dim += 8
         if self.cond_robot_mask:
             cond_info_dim += 32
-        if self.cond_hand:
-            cond_info_dim += (64 + 4 + 64)  # hand pose + bb + mask
+        if self.cond_params_3d:
+            cond_info_dim += 64
+        if self.cond_hand_bb:
+            cond_info_dim += 4
+        if self.cond_cropped_hand:
+            cond_info_dim += 64
         return cond_info_dim
 
     def init_cond_proces(self):
-        cond_process = nn.ModuleList()
+        self.robot_vec_process, self.robot_mask_process = None, None
+        self.params_3d_process, self.hand_bb_process, self.cropped_hand_process = None, None, None
+
         if self.process_cond_info:
-            if self.cond_hand:
-                params_3d_process = nn.Sequential(
+            if self.cond_robot_vec:
+                self.robot_vec_process = nn.Sequential(
+                    nn.Linear(8, 32),
+                    nn.ReLU(),
+                    nn.Linear(32, 32),
+                    nn.ReLU(),
+                    nn.Linear(32, 8)
+                ).cuda()
+            if self.cond_robot_mask:
+                self.robot_mask_process = nn.Sequential(
+                    nn.Conv2d(1, 4, 3, 2, 1),
+                    nn.ReLU(),
+                    nn.Conv2d(4, 8, 3, 2, 1),
+                    nn.ReLU(),
+                    nn.Conv2d(8, 16, 3, 2, 1),
+                    nn.ReLU(),
+                    nn.Conv2d(16, 32, 3, 2, 1)
+                ).cuda()
+            if self.cond_params_3d:
+                self.params_3d_process = nn.Sequential(
                     nn.Linear(63, 128),
                     nn.ReLU(),
                     nn.Linear(128, 128),
                     nn.ReLU(),
                     nn.Linear(128, 64)
                 ).cuda()
-                hand_bb_process = nn.Sequential(
+            if self.cond_hand_bb:
+                self.hand_bb_process = nn.Sequential(
                     nn.Linear(4, 32),
                     nn.ReLU(),
                     nn.Linear(32, 32),
                     nn.ReLU(),
                     nn.Linear(32, 4)
                 ).cuda()
-                mask_process = nn.Sequential(
+            if self.cond_cropped_hand:
+                self.cropped_hand_process = nn.Sequential(
                     nn.Conv2d(3, 8, 3, 2, 1),
                     nn.ReLU(),
                     nn.Conv2d(8, 16, 3, 2, 1),
@@ -240,30 +272,6 @@ class AutoEncoder(nn.Module):
                     nn.ReLU(),
                     nn.Conv2d(32, 64, 3, 2, 1)
                 ).cuda()
-                cond_process = nn.ModuleList([params_3d_process, hand_bb_process, mask_process])
-            else:
-                if self.cond_robot_vec:
-                    vec_process = nn.Sequential(
-                        nn.Linear(8, 32),
-                        nn.ReLU(),
-                        nn.Linear(32, 32),
-                        nn.ReLU(),
-                        nn.Linear(32, 8)
-                    ).cuda()
-                    cond_process.append(vec_process)
-                if self.cond_robot_mask:
-                    mask_process = nn.Sequential(
-                        nn.Conv2d(1, 4, 3, 2, 1),
-                        nn.ReLU(),
-                        nn.Conv2d(4, 8, 3, 2, 1),
-                        nn.ReLU(),
-                        nn.Conv2d(8, 16, 3, 2, 1),
-                        nn.ReLU(),
-                        nn.Conv2d(16, 32, 3, 2, 1)
-                    ).cuda()
-                    cond_process.append(mask_process)
-
-        return cond_process
 
     def init_stem(self):
         Cout = self.num_channels_enc
@@ -418,45 +426,39 @@ class AutoEncoder(nn.Module):
                              Conv2D(C_in, C_out, 3, padding=1, bias=True))
 
     def cond_forward(self, latent, cond_info):
-        cond_info_processed = None
-        if cond_info is not None:
-            if self.cond_hand:
-                params_3d, hand_bb, mask = cond_info
-                params_3d_process, hand_bb_process, mask_process = self.cond_process
+        robot_vec, robot_mask = None, None
+        params_3d, hand_bb, cropped_hand = None, None, None
+        if self.cond_hand:
+            params_3d, hand_bb, cropped_hand = cond_info
+        if self.cond_robot:
+            robot_vec, robot_mask = cond_info
 
-                params_3d_processed = params_3d_process(params_3d)
-                params_3d_processed = torch.tile(params_3d_processed,
-                                                 (latent.size(-2), latent.size(-1), 1, 1)).permute((-2, -1, 0, 1))
+        cond_info_processed = []
+        if self.cond_params_3d:
+            params_3d_processed = self.params_3d_process(params_3d)
+            params_3d_processed = torch.tile(params_3d_processed,
+                                             (latent.size(-2), latent.size(-1), 1, 1)).permute((-2, -1, 0, 1))
+            cond_info_processed.append(params_3d_processed)
+        if self.cond_hand_bb:
+            hand_bb_processed = self.hand_bb_process(hand_bb)
+            hand_bb_processed = torch.tile(hand_bb_processed,
+                                           (latent.size(-2), latent.size(-1), 1, 1)).permute((-2, -1, 0, 1))
+            cond_info_processed.append(hand_bb_processed)
+        if self.cond_cropped_hand:
+            cropped_hand_processed = self.cropped_hand_process(cropped_hand)
+            cropped_hand_processed = F.interpolate(cropped_hand_processed, latent.size()[-2:])
+            cond_info_processed.append(cropped_hand_processed)
+        if self.cond_robot_vec:
+            robot_vec_processed = self.robot_vec_process(robot_vec)
+            robot_vec_processed = torch.tile(robot_vec_processed,
+                                             (latent.size(-2), latent.size(-1), 1, 1)).permute((-2, -1, 0, 1))
+            cond_info_processed.append(robot_vec_processed)
+        if self.cond_robot_mask:
+            robot_mask_processed = self.robot_mask_process(robot_mask)
+            robot_mask_processed = F.interpolate(robot_mask_processed, latent.size()[-2:])
+            cond_info_processed.append(robot_mask_processed)
 
-                hand_bb_processed = hand_bb_process(hand_bb)
-                hand_bb_processed = torch.tile(hand_bb_processed,
-                                               (latent.size(-2), latent.size(-1), 1, 1)).permute((-2, -1, 0, 1))
-
-                mask_processed = mask_process(mask)
-                mask_processed = F.interpolate(mask_processed, latent.size()[-2:])
-
-                cond_info_processed = torch.cat((params_3d_processed, hand_bb_processed, mask_processed), dim=1)
-            else:
-                vec, mask = cond_info
-                if self.cond_robot_vec and self.cond_robot_mask:
-                    vec_process, mask_process = self.cond_process
-                    mask_info_processed = mask_process(mask)
-                    mask_info_processed = F.interpolate(mask_info_processed, latent.size()[-2:])
-                    vec_info_processed = vec_process(vec)
-                    vec_info_processed = torch.tile(vec_info_processed,
-                                                    (latent.size(-2), latent.size(-1), 1, 1)).permute((-2, -1, 0, 1))
-                    cond_info_processed = torch.cat((vec_info_processed, mask_info_processed), dim=1)
-                elif self.cond_robot_mask:
-                    mask_process = self.cond_process[0]
-                    cond_info_processed = mask_process(mask)
-                    cond_info_processed = F.interpolate(cond_info_processed, latent.size()[-2:])
-                elif self.cond_robot_vec:
-                    vec_process = self.cond_process[0]
-                    cond_info_processed = vec_process(vec)
-                    cond_info_processed = torch.tile(cond_info_processed,
-                                                     (latent.size(-2), latent.size(-1), 1, 1)).permute((-2, -1, 0, 1))
-
-        return cond_info_processed
+        return torch.cat(cond_info_processed, dim=1)
 
     def forward(self, x, cond_info=None):
         """
@@ -550,7 +552,9 @@ class AutoEncoder(nn.Module):
             else:
                 s = cell(s)
 
-        cond_info_processed = self.cond_forward(z if self.vanilla_vae else s, cond_info)
+        cond_info_processed = None
+        if cond_info is not None:
+            cond_info_processed = self.cond_forward(z if self.vanilla_vae else s, cond_info)
 
         if self.vanilla_vae:
             if self.zero_latent:
@@ -615,7 +619,9 @@ class AutoEncoder(nn.Module):
                 if cell.cell_type == 'up_dec':
                     scale_ind += 1
 
-        cond_info_processed = self.cond_forward(z if self.vanilla_vae else s, cond_info)
+        cond_info_processed = None
+        if cond_info is not None:
+            cond_info_processed = self.cond_forward(z if self.vanilla_vae else s, cond_info)
 
         if self.vanilla_vae:
             if self.zero_latent:
